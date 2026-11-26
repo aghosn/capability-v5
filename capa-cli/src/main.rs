@@ -196,6 +196,12 @@ fn show_help() {
     println!();
 
     println!("{}", "Channel Operations:".bright_yellow());
+    println!("  create-doorbell <caller> <self|child> <vector> <sync|async vp>");
+    println!("  send-capability <caller> <handle> <receiver>");
+    println!("  accept <receiver> <pending_id>");
+    println!("  revoke <caller> <self|parent_handle> <child_sub>");
+    println!("  notify <caller> <core> <handle> <value>");
+    println!("  doorbells <domain>  (tree, held capabilities, queue and interrupts)");
     println!("  {} <target> <chan_name>", "get-chan".bright_white().bold());
     println!("    Create a channel capability to target (caller inferred from ownership)");
     println!("    Example: get-chan dom2 chan1");

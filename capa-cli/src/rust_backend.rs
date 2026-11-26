@@ -135,6 +135,7 @@ fn convert_error(e: CapaError) -> BackendError {
         CapaError::RegisterAccessDenied => BackendError::RegisterAccessDenied,
         CapaError::InvalidValue => BackendError::InvalidOperation("invalid value".into()),
         CapaError::NoMemory => BackendError::InvalidOperation("no memory".into()),
+        CapaError::NotificationQueueFull => BackendError::InvalidOperation("notification queue full".into()),
     }
 }
 
@@ -320,6 +321,14 @@ fn format_structured_attestation(a: &StructuredAttestation) -> String {
             p.gpa, p.hpa, p.size
         ));
     }
+    out.push_str(&format!("Doorbells: {}\n", a.doorbells.len()));
+    for entry in &a.doorbells {
+        out.push_str(&format!(
+            "  handle={:?} recipient={} port={} vector={:#x} {:?}\n",
+            entry.handle, entry.doorbell.recipient, entry.doorbell.port_id,
+            entry.doorbell.vector, entry.doorbell.kind,
+        ));
+    }
 
     out
 }
@@ -327,6 +336,72 @@ fn format_structured_attestation(a: &StructuredAttestation) -> String {
 // ─── Backend trait implementation ────────────────────────────────────────────
 
 impl Backend for RustBackend {
+    fn create_doorbell(
+        &mut self, caller: DomainId, child: Option<DomainId>, vector: u8,
+        kind: capability_engine::DoorbellKind,
+    ) -> Result<(u64, u64)> {
+        let caller = self.get_domain(caller)?;
+        let child = child.map(|id| {
+            let target = self.get_domain(id)?;
+            find_domain_handle(&caller, &target).ok_or(BackendError::NotFound)
+        }).transpose()?;
+        Capability::create_doorbell(&*self.platform, &caller, child, vector, kind)
+            .map_err(convert_error)
+    }
+
+    fn send_capability(&mut self, caller: DomainId, handle: u64, receiver: DomainId) -> Result<()> {
+        let caller = self.get_domain(caller)?;
+        let receiver = self.get_domain(receiver)?;
+        let receiver = find_domain_handle(&caller, &receiver).ok_or(BackendError::NotFound)?;
+        Capability::send(&*self.platform, &caller, handle, receiver, Attributes::NONE)
+            .map(|_| ()).map_err(convert_error)
+    }
+
+    fn accept_handle(&mut self, receiver: DomainId, pending: u64) -> Result<u64> {
+        let receiver = self.get_domain(receiver)?;
+        Capability::accept(&*self.platform, &receiver, pending)
+            .map(|(handle, _)| handle).map_err(convert_error)
+    }
+
+    fn revoke_child(&mut self, caller: DomainId, parent: Option<u64>, sub: u64) -> Result<()> {
+        let caller = self.get_domain(caller)?;
+        Capability::revoke(&*self.platform, &caller,
+            parent.unwrap_or(capability_engine::SELF_CAPABILITY), sub)
+            .map(|_| ()).map_err(convert_error)
+    }
+
+    fn notify(&mut self, caller: DomainId, core: u64, handle: u64, value: u64)
+        -> Result<Option<SwitchContextDto>>
+    {
+        let caller = self.get_domain(caller)?;
+        self.platform.set_current_core(Some(core));
+        let result = Capability::notify(&*self.platform, &caller, handle, value);
+        self.platform.set_current_core(None);
+        result.map(|context| context.map(|ctx| SwitchContextDto {
+            from_domain: caller.read().data.id,
+            to_domain: ctx.to_domain.read().data.id,
+            core_id: ctx.core_id,
+            from_vp: ctx.from_vp_id,
+            to_vp: ctx.to_vp_id,
+            is_return: ctx.is_return,
+            interrupt_return: ctx.interrupt_return,
+        })).map_err(convert_error)
+    }
+
+    fn doorbells(&self, domain: DomainId) -> Result<String> {
+        let domain = self.get_domain(domain)?;
+        let report = build_structured_attestation(&domain);
+        let mut output = String::new();
+        for entry in report.doorbells {
+            let role = entry.handle.map_or("recipient-tree".to_string(), |h| format!("held handle={h}"));
+            output.push_str(&format!("{role} recipient={} port={} vector={:#x} {:?}\n",
+                entry.doorbell.recipient, entry.doorbell.port_id,
+                entry.doorbell.vector, entry.doorbell.kind));
+        }
+        output.push_str(&self.platform.doorbell_state(report.domain_id));
+        Ok(output)
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────
 
     fn init(&mut self, size: u64) -> Result<InitResult> {
@@ -461,6 +536,16 @@ impl Backend for RustBackend {
         gpa: Option<u64>,
     ) -> Result<(MemCapUid, Vec<HwUpdate>)> {
         let domain_arc = self.get_domain(domain)?;
+        let pending = self
+            .get_pending_caps(domain)
+            .into_iter()
+            .find(|offer| offer.pending_id == pending_id)
+            .ok_or(BackendError::NotFound)?;
+        if pending.is_domain {
+            return Err(BackendError::InvalidOperation(
+                "pending capability is not memory; use accept-channel or accept".into(),
+            ));
+        }
 
         let (handle, batch) =
             Capability::accept_at(&*self.platform, &domain_arc, pending_id, gpa)
@@ -618,7 +703,7 @@ impl Backend for RustBackend {
         let recv_handle = find_domain_handle(&caller_arc, &receiver_arc)
             .ok_or(BackendError::NotFound)?;
 
-        Capability::<Domain>::send_channel(
+        Capability::<Domain>::send(
             &*self.platform, &caller_arc, chan_handle, recv_handle, Attributes::NONE,
         )
         .map(|_batch| ())
@@ -631,13 +716,27 @@ impl Backend for RustBackend {
         pending_id: u64,
     ) -> Result<DomainId> {
         let receiver_arc = self.get_domain(receiver)?;
+        let pending = self
+            .get_pending_caps(receiver)
+            .into_iter()
+            .find(|offer| offer.pending_id == pending_id)
+            .ok_or(BackendError::NotFound)?;
+        if !pending.is_domain {
+            return Err(BackendError::InvalidOperation(
+                "pending capability is memory; use accept-capability or accept".into(),
+            ));
+        }
 
         let (new_handle, _batch) =
-            Capability::<Domain>::accept_channel(&*self.platform, &receiver_arc, pending_id)
+            Capability::<Domain>::accept(&*self.platform, &receiver_arc, pending_id)
                 .map_err(convert_error)?;
 
-        let chan_ref = receiver_arc.read().data.domain_capabilities[&new_handle]
-            .upgrade()
+        let chan_ref = receiver_arc
+            .read()
+            .data
+            .domain_capabilities
+            .get(&new_handle)
+            .and_then(|weak| weak.upgrade())
             .ok_or(BackendError::NotFound)?;
 
         let chan_id = self.alloc_chan_id();
@@ -648,7 +747,7 @@ impl Backend for RustBackend {
 
     fn reject_channel(&mut self, receiver: DomainId, pending_id: u64) -> Result<()> {
         let receiver_arc = self.get_domain(receiver)?;
-        Capability::<Domain>::reject_channel(&*self.platform, &receiver_arc, pending_id)
+        Capability::<Domain>::reject(&*self.platform, &receiver_arc, pending_id)
             .map(|_batch| ())
             .map_err(convert_error)
     }
@@ -779,9 +878,11 @@ impl Backend for RustBackend {
         // `deliver_interrupt_vp` already rebinds the core to the handler
         // domain internally (`core_ctx.set_binding(...)`) when the handler
         // differs from `domain` — no separate platform-side fixup needed.
+        self.platform.set_current_core(Some(core));
         let vp_delivery = Capability::<Domain>::deliver_interrupt_vp(
             self.platform.as_ref(), &domain_arc, core, vector,
         );
+        self.platform.set_current_core(None);
 
         vp_delivery.map(|_| ()).map_err(convert_error)
     }
@@ -1053,6 +1154,62 @@ impl Backend for RustBackend {
 
     fn num_cores(&self) -> usize {
         self.num_cores
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accept_channel_rejects_memory_without_consuming_the_offer() {
+        let mut backend = RustBackend::new(1);
+        let root = backend.init(0x10000).unwrap();
+        let (receiver, _) = backend
+            .create_domain(root.domain_id, 1, u64::MAX)
+            .unwrap();
+        let (memory, _) = backend
+            .carve(root.domain_id, root.mem_uid, 0x1000, 0x1000, 3)
+            .unwrap();
+        backend.seal(root.domain_id, receiver).unwrap();
+        backend.send(memory, receiver, 0, None).unwrap();
+        let pending = backend.get_pending_caps(receiver)[0].pending_id;
+
+        assert!(matches!(
+            backend.accept_channel(receiver, pending),
+            Err(BackendError::InvalidOperation(_))
+        ));
+        let offers = backend.get_pending_caps(receiver);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].pending_id, pending);
+        let (accepted, _) = backend.accept(receiver, pending, None).unwrap();
+        assert_eq!(accepted, memory);
+        assert!(backend.get_pending_caps(receiver).is_empty());
+    }
+
+    #[test]
+    fn accept_memory_rejects_channel_without_consuming_the_offer() {
+        let mut backend = RustBackend::new(1);
+        let root = backend.init(0x10000).unwrap();
+        let (receiver, _) = backend
+            .create_domain(root.domain_id, 1, u64::MAX)
+            .unwrap();
+        backend.seal(root.domain_id, receiver).unwrap();
+        let channel = backend.get_chan(root.domain_id, receiver).unwrap();
+        backend
+            .send_channel(root.domain_id, channel, receiver)
+            .unwrap();
+        let pending = backend.get_pending_caps(receiver)[0].pending_id;
+
+        assert!(matches!(
+            backend.accept(receiver, pending, None),
+            Err(BackendError::InvalidOperation(_))
+        ));
+        let offers = backend.get_pending_caps(receiver);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].pending_id, pending);
+        backend.accept_channel(receiver, pending).unwrap();
+        assert!(backend.get_pending_caps(receiver).is_empty());
     }
 }
 

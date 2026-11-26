@@ -39,6 +39,9 @@ use capability_engine::{
     MemoryRegion, RegionKind, Rights, Update,
 };
 
+#[path = "../common/mod.rs"]
+mod common;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NullPlatform — no-op Platform for sequential setup calls.  The loom-tracked
 // per-capability RwLocks still govern all concurrency; NullPlatform's lock
@@ -828,9 +831,7 @@ fn region_reuse_after_revoke() {
 
 /// Helper: create a sealed root domain capability suitable for loom tests.
 fn make_sealed_domain_root(owner: u64, handle: u64) -> CapabilityRef<Domain> {
-    let mut domain = Domain::new_root(1);
-    domain.seal().ok(); // root is already sealed, but be explicit
-    Capability::new_root(owner, handle, domain)
+    Capability::new_root(owner, handle, Domain::new_root(1))
 }
 
 #[test]
@@ -957,9 +958,21 @@ fn domain_revoke_vs_creation() {
 
 /// Helper: create a sealed domain (unique ID, all permissions).
 fn make_sealed_send_domain() -> capability_engine::CapabilityRef<Domain> {
-    let mut domain = Domain::new(DomainPolicy::new_root(1));
-    domain.seal().ok();
-    Capability::new_root(0, 0, domain)
+    make_sealed_domain_root(0, 0)
+}
+
+fn make_send_receiver(
+    parent: &CapabilityRef<Domain>,
+    sealed: bool,
+) -> (CapabilityRef<Domain>, capability_engine::LocalHandle) {
+    let platform = NullPlatform::new();
+    let handle = Capability::create(&platform, parent,
+        DomainPolicy::new_restricted(1, capability_engine::MonitorAPI::ALL)).unwrap().0;
+    let child = parent.read().data.domain_capabilities[&handle].upgrade().unwrap();
+    if sealed {
+        Capability::seal(&platform, parent, handle).unwrap();
+    }
+    (child, handle)
 }
 
 /// Helper: create a root memory cap owned by `domain` and register it at `h`.
@@ -967,15 +980,8 @@ fn register_mem_send(
     domain: &capability_engine::CapabilityRef<Domain>,
     h: capability_engine::LocalHandle,
 ) -> capability_engine::CapabilityRef<MemoryRegion> {
-    let owner_id = domain.read().data.id;
-    let cap = Capability::new_root(
-        owner_id,
-        h,
-        capability_engine::MemoryRegion::new_root(0x0, 0x1000),
-    );
-    // Use std::sync::Arc::downgrade because `Arc` in this module refers to loom::sync::Arc.
-    let weak = std::sync::Arc::downgrade(&cap);
-    domain.write().data.add_memory_capability(h, weak);
+    let (handle, cap) = common::bootstrap_memory(domain, 0, 0x1000);
+    assert_eq!(handle, h);
     cap
 }
 
@@ -1000,30 +1006,22 @@ fn loom_double_send_frozen() {
         let platform_lock = Arc::new(RwLock::new(()));
 
         let sender = make_sealed_send_domain();
-        let recv1 = make_sealed_send_domain();
-        let recv2 = make_sealed_send_domain();
         let _cap = register_mem_send(&sender, 1);
-        sender
-            .write()
-            .data
-            .add_domain_capability(1, std::sync::Arc::downgrade(&recv1));
-        sender
-            .write()
-            .data
-            .add_domain_capability(2, std::sync::Arc::downgrade(&recv2));
+        let (recv1, recv1_h) = make_send_receiver(&sender, true);
+        let (recv2, recv2_h) = make_send_receiver(&sender, true);
 
         let pl = platform_lock.clone();
         let s = sender.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap(); // shared
-            Capability::<Domain>::send(&NullPlatform::new(), &s, 1, 1, capability_engine::Attributes::NONE)
+            Capability::<Domain>::send(&NullPlatform::new(), &s, 1, recv1_h, capability_engine::Attributes::NONE)
         });
 
         let pl = platform_lock.clone();
         let s = sender.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap(); // shared
-            Capability::<Domain>::send(&NullPlatform::new(), &s, 1, 2, capability_engine::Attributes::NONE)
+            Capability::<Domain>::send(&NullPlatform::new(), &s, 1, recv2_h, capability_engine::Attributes::NONE)
         });
 
         let res_a = ta.join().unwrap();
@@ -1046,6 +1044,281 @@ fn loom_double_send_frozen() {
     });
 }
 
+fn check_concurrent_endpoint_sends(doorbell: bool, sealed_receiver: bool, reuse_handle: bool) {
+    let mut model = loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.check(move || {
+        let platform = NullPlatform::new();
+        let sender = make_sealed_domain_root(0, 0);
+        let policy = DomainPolicy::new_restricted(1, capability_engine::MonitorAPI::ALL);
+        let recv1_h = Capability::create(&platform, &sender, policy.clone())
+            .unwrap()
+            .0;
+        let recv2_h = Capability::create(&platform, &sender, policy).unwrap().0;
+        if sealed_receiver {
+            Capability::seal(&platform, &sender, recv2_h).unwrap();
+        }
+        let recv1 = sender.read().data.domain_capabilities[&recv1_h]
+            .upgrade()
+            .unwrap();
+        let recv2 = sender.read().data.domain_capabilities[&recv2_h]
+            .upgrade()
+            .unwrap();
+        let handle = if doorbell {
+            Capability::create_doorbell(
+                &platform,
+                &sender,
+                None,
+                64,
+                capability_engine::DoorbellKind::Sync,
+            )
+            .unwrap()
+            .0
+        } else {
+            Capability::get_chan_self(&platform, &sender).unwrap().0
+        };
+        let endpoint = sender.read().data.domain_capabilities[&handle]
+            .upgrade()
+            .unwrap();
+
+        let s = sender.clone();
+        let first = thread::spawn(move || {
+            let result =
+                Capability::send(&NullPlatform::new(), &s, handle, recv1_h, Attributes::NONE);
+            if reuse_handle && result.is_ok() {
+                let replacement = Capability::create_doorbell(
+                    &NullPlatform::new(),
+                    &s,
+                    None,
+                    64,
+                    capability_engine::DoorbellKind::Sync,
+                )
+                .unwrap()
+                .0;
+                assert_eq!(replacement, handle);
+            }
+            result
+        });
+        let s = sender.clone();
+        let second = thread::spawn(move || {
+            if reuse_handle {
+                Capability::send_channel(
+                    &NullPlatform::new(),
+                    &s,
+                    handle,
+                    recv2_h,
+                    Attributes::NONE,
+                )
+            } else {
+                Capability::send(&NullPlatform::new(), &s, handle, recv2_h, Attributes::NONE)
+            }
+        });
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        for error in results.iter().filter_map(|r| r.as_ref().err()) {
+            assert!(matches!(
+                error,
+                CapaError::NotFound | CapaError::PermissionDenied
+            ));
+        }
+
+        let first_won = results[0].is_ok();
+        assert_eq!(
+            recv1.read().data.domain_capabilities.len(),
+            usize::from(first_won)
+        );
+        assert_eq!(
+            recv2.read().data.domain_capabilities.len(),
+            usize::from(!first_won && !sealed_receiver),
+        );
+        assert_eq!(
+            recv2.read().data.pending_domain_capabilities.len(),
+            usize::from(!first_won && sealed_receiver),
+        );
+        if !first_won && sealed_receiver {
+            assert!(sender.read().data.is_domain_handle_frozen(handle));
+            let pending = recv2
+                .read()
+                .data
+                .pending_domain_capabilities
+                .keys()
+                .copied()
+                .next()
+                .unwrap();
+            Capability::accept(&platform, &recv2, pending).unwrap();
+        }
+        assert_eq!(
+            sender.read().data.domain_capabilities.contains_key(&handle),
+            reuse_handle && first_won,
+        );
+        let winner = if first_won { &recv1 } else { &recv2 };
+        let held = winner
+            .read()
+            .data
+            .domain_capabilities
+            .values()
+            .next()
+            .unwrap()
+            .upgrade()
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&held, &endpoint));
+        assert_eq!(endpoint.read().owned.owner, winner.read().data.id);
+        let owner = endpoint
+            .read()
+            .owned
+            .owner_domain
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&owner, winner));
+    });
+}
+
+#[test]
+fn loom_double_send_channel_to_unsealed_receivers() {
+    check_concurrent_endpoint_sends(false, false, false);
+}
+
+#[test]
+fn loom_double_send_doorbell_to_unsealed_receivers() {
+    check_concurrent_endpoint_sends(true, false, false);
+}
+
+#[test]
+fn loom_double_send_channel_to_mixed_receivers() {
+    check_concurrent_endpoint_sends(false, true, false);
+}
+
+#[test]
+fn loom_double_send_doorbell_to_mixed_receivers() {
+    check_concurrent_endpoint_sends(true, true, false);
+}
+
+#[test]
+fn loom_endpoint_send_handle_reuse() {
+    check_concurrent_endpoint_sends(false, false, true);
+}
+
+fn check_endpoint_publication(accept: bool, sealed_receiver: bool) {
+    let mut model = loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.check(move || {
+        let platform = NullPlatform::new();
+        let sender = make_sealed_domain_root(0, 0);
+        let policy = DomainPolicy::new_restricted(1, capability_engine::MonitorAPI::ALL);
+        let receiver_h = Capability::create(&platform, &sender, policy).unwrap().0;
+        if sealed_receiver {
+            Capability::seal(&platform, &sender, receiver_h).unwrap();
+        }
+        let receiver = sender.read().data.domain_capabilities[&receiver_h]
+            .upgrade()
+            .unwrap();
+        let handle = Capability::get_chan_self(&platform, &sender).unwrap().0;
+        let endpoint = sender.read().data.domain_capabilities[&handle]
+            .upgrade()
+            .unwrap();
+
+        let s = sender.clone();
+        let sending = thread::spawn(move || {
+            Capability::send(
+                &NullPlatform::new(),
+                &s,
+                handle,
+                receiver_h,
+                Attributes::NONE,
+            )
+            .unwrap();
+        });
+        let r = receiver.clone();
+        let observing = thread::spawn(move || {
+            let pending_id = {
+                let domain = r.read();
+                for weak in domain.data.domain_capabilities.values() {
+                    let endpoint = weak.upgrade().unwrap();
+                    let e = endpoint.read();
+                    assert_eq!(e.owned.owner, domain.data.id);
+                    let owner = e.owned.owner_domain.as_ref().unwrap().upgrade().unwrap();
+                    assert!(std::sync::Arc::ptr_eq(&owner, &r));
+                }
+                domain
+                    .data
+                    .pending_domain_capabilities
+                    .iter()
+                    .next()
+                    .map(|(id, pending)| {
+                        let endpoint = pending.cap.upgrade().unwrap();
+                        let e = endpoint.read();
+                        let target = e
+                            .owned
+                            .pending_receiver
+                            .as_ref()
+                            .unwrap()
+                            .upgrade()
+                            .unwrap();
+                        assert!(std::sync::Arc::ptr_eq(&target, &r));
+                        *id
+                    })
+            };
+            if let Some(id) = pending_id {
+                if accept {
+                    Capability::accept(&NullPlatform::new(), &r, id).unwrap();
+                } else {
+                    Capability::reject_channel(&NullPlatform::new(), &r, id).unwrap();
+                }
+            }
+        });
+        sending.join().unwrap();
+        observing.join().unwrap();
+
+        let pending = receiver
+            .read()
+            .data
+            .pending_domain_capabilities
+            .keys()
+            .copied()
+            .next();
+        if let Some(id) = pending {
+            if accept {
+                Capability::accept(&platform, &receiver, id).unwrap();
+            } else {
+                Capability::reject_channel(&platform, &receiver, id).unwrap();
+            }
+        }
+        let e = endpoint.read();
+        assert!(e.owned.pending_receiver.is_none());
+        let transferred = accept || !sealed_receiver;
+        assert_eq!(
+            e.owned.owner,
+            if transferred {
+                receiver.read().data.id
+            } else {
+                sender.read().data.id
+            }
+        );
+        assert_eq!(
+            sender.read().data.domain_capabilities.contains_key(&handle),
+            !transferred
+        );
+        assert!(!sender.read().data.is_domain_handle_frozen(handle));
+    });
+}
+
+#[test]
+fn loom_endpoint_pending_publication_accept() {
+    check_endpoint_publication(true, true);
+}
+
+#[test]
+fn loom_endpoint_pending_publication_reject() {
+    check_endpoint_publication(false, true);
+}
+
+#[test]
+fn loom_endpoint_immediate_publication() {
+    check_endpoint_publication(false, false);
+}
+
 // ── Case 7b — Two threads both try to accept the same pending entry ───────────
 //
 // | Thread A (shared lock)              | Thread B (shared lock)              |
@@ -1065,15 +1338,11 @@ fn loom_accept_vs_accept() {
         let platform_lock = Arc::new(RwLock::new(()));
 
         let sender = make_sealed_send_domain();
-        let receiver = make_sealed_send_domain();
         let _cap = register_mem_send(&sender, 1);
+        let (receiver, receiver_h) = make_send_receiver(&sender, true);
 
         // Pre-send (sequential, before threads) so both threads see a pending entry.
-        sender
-            .write()
-            .data
-            .add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
-        Capability::<Domain>::send(&NullPlatform::new(), &sender, 1, 1, capability_engine::Attributes::NONE)
+        Capability::<Domain>::send(&NullPlatform::new(), &sender, 1, receiver_h, capability_engine::Attributes::NONE)
             .unwrap();
         let pending_ids = receiver.read().data.get_pending_ids();
         assert_eq!(pending_ids.len(), 1);
@@ -1130,14 +1399,10 @@ fn loom_accept_vs_reject() {
         let platform_lock = Arc::new(RwLock::new(()));
 
         let sender = make_sealed_send_domain();
-        let receiver = make_sealed_send_domain();
         let _cap = register_mem_send(&sender, 1);
+        let (receiver, receiver_h) = make_send_receiver(&sender, true);
 
-        sender
-            .write()
-            .data
-            .add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
-        Capability::<Domain>::send(&NullPlatform::new(), &sender, 1, 1, capability_engine::Attributes::NONE)
+        Capability::<Domain>::send(&NullPlatform::new(), &sender, 1, receiver_h, capability_engine::Attributes::NONE)
             .unwrap();
         let pid = receiver.read().data.get_pending_ids()[0];
 
@@ -1204,10 +1469,10 @@ fn loom_revoke_vs_accept() {
         let platform_lock = Arc::new(RwLock::new(()));
 
         let sender = make_sealed_send_domain();
-        let receiver = make_sealed_send_domain();
 
         // Register root cap at handle 1.
         let _root = register_mem_send(&sender, 1);
+        let (receiver, receiver_h) = make_send_receiver(&sender, true);
 
         // Carve a child [0, 0x100).
         let (child_h, child_sub, _) =
@@ -1215,11 +1480,7 @@ fn loom_revoke_vs_accept() {
                 .unwrap();
 
         // Send the child to receiver.
-        sender
-            .write()
-            .data
-            .add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
-        Capability::<Domain>::send(&NullPlatform::new(), &sender, child_h, 1, capability_engine::Attributes::NONE)
+        Capability::<Domain>::send(&NullPlatform::new(), &sender, child_h, receiver_h, capability_engine::Attributes::NONE)
             .unwrap();
         let pid = receiver.read().data.get_pending_ids()[0];
 
@@ -1263,38 +1524,40 @@ fn loom_revoke_vs_accept() {
 //
 // | Thread A (exclusive lock)           | Thread B (shared lock)              |
 // |-------------------------------------|-------------------------------------|
-// | sender.write().data.revoke()        | accept(receiver, pending_id) |
+// | revoke_domain(parent, sender_h)     | accept(receiver, pending_id) |
 //
 // Setup: sender has sent a memory cap to receiver (pending exists, handle frozen).
-// Thread A simulates domain revocation by marking the sender as Revoked.
+// Thread A revokes the sender through its parent capability.
 // Thread B tries to accept.
 //
 // Valid outcomes (all schedules):
-// - A then B: sender.is_revoked() → accept returns PermissionDenied; pending cleared.
-// - B then A: accept completes before revocation; receiver owns the cap.
-//   Revocation then runs (no interaction with the already-transferred cap).
+// - A then B: revocation cancels the offer; accept returns NotFound.
+// - B then A: accept succeeds before sender revocation; the receiver keeps the cap.
 #[test]
 fn loom_revoke_domain_vs_accept() {
     loom::model(|| {
         let platform_lock = Arc::new(RwLock::new(()));
 
-        let sender = make_sealed_send_domain();
-        let receiver = make_sealed_send_domain();
-        let _cap = register_mem_send(&sender, 1);
-
-        sender
-            .write()
-            .data
-            .add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
-        Capability::<Domain>::send(&NullPlatform::new(), &sender, 1, 1, capability_engine::Attributes::NONE)
-            .unwrap();
+        let platform = NullPlatform::new();
+        let (parent, memory_h, _backing) = dm_make_root(0x4000);
+        let (receiver, receiver_h) = make_send_receiver(&parent, true);
+        let (sender, sender_h) = make_send_receiver(&parent, false);
+        let carved = Capability::carve(&platform, &parent, memory_h,
+            Access::new(0, 0x1000, Rights::RW)).unwrap().0;
+        Capability::send(&platform, &parent, carved, sender_h, Attributes::NONE).unwrap();
+        let channel = Capability::get_chan(&platform, &parent, receiver_h).unwrap().0;
+        Capability::send(&platform, &parent, channel, sender_h, Attributes::NONE).unwrap();
+        let memory = *sender.read().data.memory_capabilities.keys().next().unwrap();
+        let channel = *sender.read().data.domain_capabilities.keys().next().unwrap();
+        Capability::seal(&platform, &parent, sender_h).unwrap();
+        Capability::send(&platform, &sender, memory, channel, Attributes::NONE).unwrap();
         let pid = receiver.read().data.get_pending_ids()[0];
 
         let pl = platform_lock.clone();
-        let s = sender.clone();
+        let p = parent.clone();
         let revoker = thread::spawn(move || {
-            let _guard = pl.write().unwrap(); // exclusive (simulates domain revocation)
-            s.write().data.revoke();
+            let _guard = pl.write().unwrap();
+            Capability::revoke_domain(&NullPlatform::new(), &p, sender_h).unwrap();
         });
 
         let pl = platform_lock.clone();
@@ -1310,14 +1573,12 @@ fn loom_revoke_domain_vs_accept() {
         // Pending queue must be empty regardless of outcome.
         assert!(receiver.read().data.get_pending_ids().is_empty());
 
-        if accept_res.is_ok() {
-            // Accept-first: receiver owns the cap.
-            assert_eq!(receiver.read().data.memory_capability_handles().len(), 1);
-        } else {
-            // Revoke-first: accept rejected.
-            assert!(matches!(accept_res, Err(CapaError::PermissionDenied)));
-            assert_eq!(receiver.read().data.memory_capability_handles().len(), 0);
+        let accepted = accept_res.is_ok();
+        if let Err(error) = accept_res {
+            assert_eq!(error, CapaError::NotFound);
         }
+        assert!(sender.read().data.is_revoked());
+        assert_eq!(receiver.read().data.memory_capability_handles().len(), usize::from(accepted));
     });
 }
 
@@ -1337,11 +1598,6 @@ fn loom_revoke_domain_vs_accept() {
 
 /// Bootstrap: sealed root domain (id 0) with a root memory region at handle 1.
 ///
-/// The root memory's `owner_domain` is left as `None` (bootstrapping escape
-/// hatch) so that the first `carve` skips `validate_operation`.
-/// Children carved via `carve` get `owner_domain = Some(root_dom)`, so
-/// subsequent domain-mediated operations on them correctly check the domain.
-///
 /// Returns `(domain, handle, root_mem_arc)` — the caller must keep
 /// `root_mem_arc` alive for the duration of the test; the domain table only
 /// stores a `Weak` reference.
@@ -1354,13 +1610,7 @@ fn dm_make_root(
 ) {
     let dom_data = Domain::new_root(1); // id = 0, already sealed
     let dom: capability_engine::CapabilityRef<Domain> = Capability::new_root(0, 0, dom_data);
-    let owner_id = dom.read().data.id;
-    let h: capability_engine::LocalHandle = 1;
-    let mem: capability_engine::CapabilityRef<MemoryRegion> =
-        Capability::new_root(owner_id, h, MemoryRegion::new_root(0x0, size));
-    dom.write()
-        .data
-        .add_memory_capability(h, std::sync::Arc::downgrade(&mem));
+    let (h, mem) = common::bootstrap_memory(&dom, 0, size);
     (dom, h, mem)
 }
 
@@ -1461,7 +1711,7 @@ fn loom_dm_send_vs_revoke_sibling() {
     loom::model(|| {
         let platform_lock = Arc::new(RwLock::new(()));
         let (dom, h_root, _root_mem) = dm_make_root(0x4000);
-        let receiver = make_sealed_send_domain();
+        let (receiver, receiver_h) = make_send_receiver(&dom, true);
 
         // Sequential setup: carve two non-overlapping children.
         let (h_c1, _, _) = Capability::<Domain>::carve(
@@ -1477,21 +1727,17 @@ fn loom_dm_send_vs_revoke_sibling() {
         )
         .expect("setup: carve child2");
 
-        dom.write()
-            .data
-            .add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
-
         let pl = platform_lock.clone();
         let d = dom.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::send(&NullPlatform::new(), &d, h_c1, 1, Attributes::NONE)
+            Capability::<Domain>::send(&NullPlatform::new(), &d, h_c1, receiver_h, Attributes::NONE)
         });
 
         let pl = platform_lock.clone();
         let d = dom.clone();
         let tb = thread::spawn(move || {
-            let _guard = pl.read().unwrap();
+            let _guard = pl.write().unwrap();
             Capability::<Domain>::revoke(&NullPlatform::new(), &d, h_root, sub_c2)
         });
 
@@ -1536,12 +1782,6 @@ fn loom_dm_send_vs_revoke_sibling() {
 //                                               [Unmap(new_owner), Map(orig_owner)]
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Helper: create an unsealed domain with all permissions (MonitorAPI::ALL).
-fn make_unsealed_domain() -> capability_engine::CapabilityRef<Domain> {
-    let domain = Domain::new(DomainPolicy::new_root(1));
-    Capability::new_root(0, 0, domain)
-}
-
 // ── Case 9a — Concurrent immediate sends to distinct unsealed receivers ───────
 //
 // | Thread A (shared lock)                          | Thread B (shared lock)                          |
@@ -1582,23 +1822,11 @@ fn loom_send_memory_immediate_updates() {
         .expect("setup: carve child2");
 
         // Two distinct unsealed receivers.
-        let dom_b = make_unsealed_domain();
-        let dom_c = make_unsealed_domain();
+        let (dom_b, h_db) = make_send_receiver(&dom_a, false);
+        let (dom_c, h_dc) = make_send_receiver(&dom_a, false);
         let dom_b_id = dom_b.read().data.id;
         let dom_c_id = dom_c.read().data.id;
         let _dom_a_id = dom_a.read().data.id;
-
-        // Register dom_b and dom_c as domain capabilities of dom_a.
-        let h_db: capability_engine::LocalHandle = 1;
-        let h_dc: capability_engine::LocalHandle = 2;
-        dom_a
-            .write()
-            .data
-            .add_domain_capability(h_db, std::sync::Arc::downgrade(&dom_b));
-        dom_a
-            .write()
-            .data
-            .add_domain_capability(h_dc, std::sync::Arc::downgrade(&dom_c));
 
         // Thread A: send c1 to dom_b.
         let da = dom_a.clone();
@@ -1676,15 +1904,11 @@ fn loom_accept_memory_updates() {
         let _cap = register_mem_send(&dom_b, 1);
 
         // dom_c: sealed receiver with RECEIVE_AFTER_SEAL.
-        let dom_c = make_sealed_send_domain();
+        let (dom_c, receiver_h) = make_send_receiver(&dom_b, true);
         let dom_c_id = dom_c.read().data.id;
 
         // dom_b sends to dom_c → pending queue (dom_c is sealed).
-        dom_b
-            .write()
-            .data
-            .add_domain_capability(1, std::sync::Arc::downgrade(&dom_c));
-        Capability::<Domain>::send(&NullPlatform::new(), &dom_b, 1, 1, Attributes::NONE)
+        Capability::<Domain>::send(&NullPlatform::new(), &dom_b, 1, receiver_h, Attributes::NONE)
             .expect("setup: send to pending queue");
 
         let pid = dom_c.read().data.get_pending_ids()[0];
@@ -1775,13 +1999,8 @@ fn loom_revoke_memory_child_after_send_dm() {
         .expect("setup: carve child");
 
         // Create unsealed receiver dom_b and immediately transfer c1.
-        let dom_b = make_unsealed_domain();
+        let (dom_b, h_db) = make_send_receiver(&dom_a, false);
         let dom_b_id = dom_b.read().data.id;
-        let h_db: capability_engine::LocalHandle = 1;
-        dom_a
-            .write()
-            .data
-            .add_domain_capability(h_db, std::sync::Arc::downgrade(&dom_b));
         Capability::<Domain>::send(&NullPlatform::new(), &dom_a, h_c1, h_db, Attributes::NONE)
             .expect("setup: send c1 to dom_b");
 

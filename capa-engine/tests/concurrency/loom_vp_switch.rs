@@ -10,10 +10,9 @@
 //! every valid interleaving of the write-lock acquisitions that guard state
 //! transitions.
 //!
-//! The tests do NOT go through `execute()` (which adds the platform op-lock
-//! layer); they call `switch` directly, matching real usage where the
-//! caller already holds the appropriate lock.  The `LoomPlatform` below provides
-//! a minimal `Platform` implementation backed by `loom::sync` primitives.
+//! The domain-mediated methods own `execute()`. The minimal platform uses a
+//! no-op shared operation guard, allowing concurrent calls and modelling the
+//! per-VP locks with `loom::sync` primitives.
 //!
 //! # Tests
 //!
@@ -54,10 +53,13 @@ use loom::sync::Arc;
 use loom::thread;
 
 use capability_engine::{
-    Capability, CapabilityRef, CoreId, Domain, DomainId, DomainPolicy,
-    LocalHandle, MonitorAPI, OpLockGuard, Platform, Result, SwitchManager, Update, VpCallContext,
+    Capability, CapabilityRef, CoreId, Domain, DomainId, DomainPolicy, LocalHandle, MonitorAPI,
+    OpLockGuard, Platform, Result, SwitchContext, SwitchManager, Update, VpCallContext, VpHandoff,
     VpRunState,
 };
+
+#[path = "../common/mod.rs"]
+mod common;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Minimal loom platform
@@ -72,6 +74,8 @@ use capability_engine::{
 struct LoomPlatform {
     current_core: CoreId,
     switch_manager: Arc<SwitchManager>,
+    notification_lock: Option<Arc<loom::sync::atomic::AtomicUsize>>,
+    doorbells: Option<Arc<loom::sync::Mutex<Vec<capability_engine::DoorbellNotification>>>>,
 }
 
 impl LoomPlatform {
@@ -79,15 +83,51 @@ impl LoomPlatform {
         LoomPlatform {
             current_core,
             switch_manager,
+            notification_lock: None,
+            doorbells: None,
         }
     }
 }
 
-// VP tests call switch directly (not via execute()), so the op-lock
-// methods are never invoked.  A dummy guard satisfies the trait bound.
+// These tests exercise shared operations only; shared guards do not serialize
+// their threads. VP locks and the hardware handoff window remain modelled.
 struct DummyGuard;
 impl OpLockGuard for DummyGuard {}
 unsafe impl Send for DummyGuard {}
+
+struct NotificationGuard {
+    lock: Arc<loom::sync::atomic::AtomicUsize>,
+    exclusive: bool,
+}
+impl OpLockGuard for NotificationGuard {}
+impl Drop for NotificationGuard {
+    fn drop(&mut self) {
+        use loom::sync::atomic::Ordering;
+        if self.exclusive {
+            self.lock.store(0, Ordering::Release);
+        } else {
+            self.lock.fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
+fn notification_guard(
+    lock: &Option<Arc<loom::sync::atomic::AtomicUsize>>,
+    exclusive: bool,
+) -> Box<dyn OpLockGuard> {
+    use loom::sync::atomic::Ordering;
+    let Some(lock) = lock else { return Box::new(DummyGuard) };
+    loop {
+        let current = lock.load(Ordering::Acquire);
+        if current != usize::MAX && (!exclusive || current == 0) {
+            let next = if exclusive { usize::MAX } else { current + 1 };
+            if lock.compare_exchange(current, next, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                return Box::new(NotificationGuard { lock: lock.clone(), exclusive });
+            }
+        }
+        thread::yield_now();
+    }
+}
 
 // Safety: LoomPlatform only contains CoreId (Copy) and Arc<SwitchManager>,
 // so LoomPlatform is Send + Sync.
@@ -131,13 +171,102 @@ impl Platform for NullPlatform {
     }
 }
 
+    #[test]
+    fn doorbell_notify_and_revoke_are_one_transaction() {
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(2);
+        model.check(|| {
+            let setup = NullPlatform::new();
+            let root = Capability::new_root(0, 0, Domain::new_root(1));
+            let (_memory, _backing) = common::bootstrap_memory(&root, 0x1000_0000, 0x1000_0000);
+            let child_h = Capability::create(&setup, &root,
+                DomainPolicy::new_restricted(1, MonitorAPI::ALL)).unwrap().0;
+            let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
+            common::add_test_vps(&setup, &root, child_h, 1);
+            let (handle, port) = Capability::create_doorbell(
+                &setup, &root, None, 0x91, capability_engine::DoorbellKind::Sync,
+            ).unwrap();
+            Capability::send(&setup, &root, handle, child_h, capability_engine::Attributes::NONE).unwrap();
+            let received = *child.read().data.domain_capabilities.keys().next().unwrap();
+            Capability::seal(&setup, &root, child_h).unwrap();
+            init_vp_running(&root, 0, 0);
+            let mut platform = LoomPlatform::new(0, Arc::new(SwitchManager::new(1)));
+            platform.notification_lock = Some(Arc::new(loom::sync::atomic::AtomicUsize::new(0)));
+            let queue = Arc::new(loom::sync::Mutex::new(Vec::new()));
+            platform.doorbells = Some(queue.clone());
+            Capability::switch(&platform, &root, child_h, 0).unwrap();
+            let platform = Arc::new(platform);
+            let sender = {
+                let platform = platform.clone();
+                let child = child.clone();
+                thread::spawn(move || Capability::notify(&*platform, &child, received, 7))
+            };
+            let remover = {
+                let platform = platform.clone();
+                let root = root.clone();
+                thread::spawn(move || Capability::revoke(
+                    &*platform, &root, capability_engine::SELF_CAPABILITY, port,
+                ))
+            };
+            let sent = sender.join().unwrap();
+            remover.join().unwrap().unwrap();
+            assert_eq!(queue.lock().unwrap().len(), usize::from(sent.is_ok()));
+            assert!(!child.read().data.domain_capabilities.contains_key(&received));
+            let vp = child.read().data.policy.vprocessor_states[0].clone();
+            if sent.is_ok() {
+                assert!(matches!(*vp.run_state.read(), VpRunState::Waiting { .. }));
+            } else {
+                assert!(matches!(*vp.run_state.read(), VpRunState::Running { core: 0 }));
+            }
+        });
+    }
 
 impl Platform for LoomPlatform {
+    fn commit_doorbell(
+        &self,
+        notification: &capability_engine::DoorbellNotification,
+        commit: &mut dyn FnMut(),
+    ) -> Result<()> {
+        self.doorbells.as_ref().unwrap().lock().unwrap().push(*notification);
+        thread::yield_now();
+        commit();
+        Ok(())
+    }
+
+    fn handoff_vp(&self, context: &SwitchContext, handoff: VpHandoff) {
+        if matches!(handoff, VpHandoff::Call) {
+            return;
+        }
+        let source = context.from_domain.as_ref().unwrap();
+        let source_vp = source.read().data.policy.vprocessor_states
+            [context.from_vp_id.unwrap() as usize]
+            .clone();
+        let target_vp = context.to_domain.read().data.policy.vprocessor_states
+            [context.to_vp_id.unwrap() as usize]
+            .clone();
+        assert!(matches!(
+            *source_vp.run_state.read(),
+            VpRunState::Running { core } if core == self.current_core
+        ));
+        assert!(matches!(
+            *target_vp.run_state.read(),
+            VpRunState::Locked { .. }
+        ));
+        thread::yield_now();
+        assert!(
+            matches!(
+                *source_vp.run_state.read(),
+                VpRunState::Running { core } if core == self.current_core
+            ),
+            "source was claimed while its hardware was still active"
+        );
+    }
+
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
-        Ok(Box::new(DummyGuard))
+        Ok(notification_guard(&self.notification_lock, false))
     }
     fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>> {
-        Ok(Box::new(DummyGuard))
+        Ok(notification_guard(&self.notification_lock, true))
     }
     fn send_ipi(&self, _: CoreId) {}
     fn apply_update(&self, _: &Update) {}
@@ -159,6 +288,69 @@ impl Platform for LoomPlatform {
 // Test helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
+#[test]
+fn vp_emulated_msr_runtime_values_are_independent() {
+    let mut model = loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.check(|| {
+        use capability_engine::{FeatureAction, PolicyIdentifier, ResourceKind};
+
+        let parent = Capability::new_root(0, 0, Domain::new_root(2));
+        let (_memory, _backing) = common::bootstrap_memory(&parent, 0x1000_0000, 0x1000_0000);
+        let setup = NullPlatform::new();
+        let h = Capability::create(
+            &setup,
+            &parent,
+            DomainPolicy::new_restricted(3, MonitorAPI::ALL),
+        )
+        .unwrap()
+        .0;
+        let child = parent.read().data.domain_capabilities[&h]
+            .upgrade()
+            .unwrap();
+        common::add_test_vps(&setup, &parent, h, 2);
+        Capability::set_policy(
+            &setup,
+            &parent,
+            h,
+            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, 0x1234, 0, 0),
+            17,
+        )
+        .unwrap();
+        Capability::seal(&setup, &parent, h).unwrap();
+        init_vp_running(&parent, 0, 0);
+        init_vp_running(&parent, 1, 1);
+        let switches = Arc::new(SwitchManager::new(2));
+        let mut threads = Vec::new();
+        for vp in 0..2 {
+            let parent = parent.clone();
+            let child = child.clone();
+            let switches = switches.clone();
+            threads.push(thread::spawn(move || {
+                let platform = LoomPlatform::new(vp, switches);
+                Capability::switch(&platform, &parent, h, vp).unwrap();
+                assert_eq!(
+                    Capability::msr_action(&platform, &child, 0x1234).unwrap(),
+                    FeatureAction::Emulate(17),
+                );
+                Capability::update_msr_emulate_value(&platform, &child, 0x1234, 100 + vp).unwrap();
+                assert_eq!(
+                    Capability::msr_action(&platform, &child, 0x1234).unwrap(),
+                    FeatureAction::Emulate(100 + vp),
+                );
+                Capability::switch_return_with_exit(&platform, &child, 30).unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            child.read().data.policy.msrs.action(&0x1234),
+            FeatureAction::Emulate(17)
+        );
+    });
+}
+
 /// Forcibly set VP[`vp_id`] of `domain` to `Running { core }`.
 /// Call this BEFORE spawning loom threads (sequential setup only).
 fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
@@ -170,16 +362,15 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 
 /// Create a sealed child domain under `parent` and return `(child_ref, handle)`.
 /// Child has all-core access and full API (including SWITCH).
-fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
+fn make_sealed_child(setup: &common::TestPlatform, parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
+    setup.ensure_boot_memory(parent);
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let num_vps = policy.num_vprocessors;
     let h = Capability::create(&NullPlatform::new(), parent, policy).unwrap().0;
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();
-    for _ in 0..num_vps as u64 {
-        child.write().data.add_vprocessor().unwrap();
-    }
+    common::add_test_vps(setup, parent, h, num_vps);
     Capability::seal(&NullPlatform::new(), parent, h).unwrap();
     (child, h)
 }
@@ -196,7 +387,8 @@ fn vp_race_two_cores_same_vp() {
     loom::model(|| {
         // ── Setup (sequential) ──────────────────────────────────────────────
         let root = Capability::new_root(0, 0, Domain::new_root(4));
-        let (target, target_h) = make_sealed_child(&root);
+        let setup = common::TestPlatform::new();
+        let (target, target_h) = make_sealed_child(&setup, &root);
 
         // VP[0] and VP[1] of root are Running on cores 0 and 1 respectively.
         init_vp_running(&root, 0, 0);
@@ -262,7 +454,8 @@ fn vp_two_cores_different_vps() {
     loom::model(|| {
         // ── Setup ───────────────────────────────────────────────────────────
         let root = Capability::new_root(0, 0, Domain::new_root(4));
-        let (target, target_h) = make_sealed_child(&root);
+        let setup = common::TestPlatform::new();
+        let (target, target_h) = make_sealed_child(&setup, &root);
 
         init_vp_running(&root, 0, 0); // core 0 runs root VP[0]
         init_vp_running(&root, 1, 1); // core 1 runs root VP[1]
@@ -342,50 +535,12 @@ fn vp_concurrent_return_and_claim() {
         // ── Setup (sequential) ──────────────────────────────────────────────
         let root = Capability::new_root(0, 0, Domain::new_root(4));
 
-        // Build domain B as a sealed child of root.
-        let (b_domain, b_h) = make_sealed_child(&root);
-
-        // root VP[0] is "Locked" (it called into B).
-        // root VP[1] is Running on core 1.
-        // B.VP[0] is Running on core 0, with root.VP[0] as its caller.
-        {
-            let rd = root.read();
-            let vp0 = rd.data.policy.vprocessor_states[0].clone();
-            let vp1 = rd.data.policy.vprocessor_states[1].clone();
-            drop(rd);
-
-            // root.VP[0]: Locked (waiting for B.VP[0] to return)
-            *vp0.run_state.write() = VpRunState::Locked {
-                callee_domain_id: b_domain.read().data.id,
-                callee_vp_id: 0,
-            };
-            // root.VP[1]: Running on core 1
-            *vp1.run_state.write() = VpRunState::Running { core: 1 };
-        }
-        {
-            let bd = b_domain.read();
-            let bvp0 = bd.data.policy.vprocessor_states[0].clone();
-            drop(bd);
-
-            *bvp0.run_state.write() = VpRunState::Running { core: 0 };
-        }
-
+        let setup = common::TestPlatform::new();
+        let (b_domain, b_h) = make_sealed_child(&setup, &root);
+        init_vp_running(&root, 0, 0);
+        init_vp_running(&root, 1, 1);
         let switch_mgr = Arc::new(SwitchManager::new(4));
-
-        // The hand-rolled setup above puts B.VP[0] Running on core 0 with
-        // root.VP[0] as its caller *without* going through a real
-        // `switch_domain_forward` call, so core 0's call_stack needs the
-        // matching frame pushed by hand too — mirroring what a real forward
-        // switch (root → B) would have pushed.
-        {
-            let root_id = root.read().data.id;
-            let root_vp0_weak = std::sync::Arc::downgrade(&root);
-            switch_mgr.get_core(0).unwrap().push_frame(VpCallContext {
-                domain: root_vp0_weak,
-                domain_id: root_id,
-                vp_id: 0,
-            });
-        }
+        Capability::switch(&LoomPlatform::new(0, switch_mgr.clone()), &root, b_h, 0).unwrap();
 
         let root_t1 = root.clone();
         let b_t0 = b_domain.clone();
@@ -499,13 +654,14 @@ fn vp_interrupt_delivery_vs_claim_race() {
 
         // dom0: root with 4 VPs — will be the DELIVER handler.
         let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
+        let setup = common::TestPlatform::new();
         let _dom0_id = dom0.read().data.id;
 
         // dom1: child of dom0 with 4 VPs — intermediate (REPORT) domain.
-        let (dom1, dom1_h_in_dom0) = make_sealed_child(&dom0);
+        let (dom1, dom1_h_in_dom0) = make_sealed_child(&setup, &dom0);
 
         // dom2: child of dom0 with 4 VPs — the domain running when interrupt fires.
-        let (dom2, _) = make_sealed_child(&dom0);
+        let (dom2, _) = make_sealed_child(&setup, &dom0);
 
         // Give dom1 a handle to dom2 so it can switch to dom2.
         let dom2_h_in_dom1: LocalHandle = {
@@ -630,8 +786,9 @@ fn vp_two_cores_race_waiting_vp() {
     loom::model(|| {
         // ── Sequential setup ────────────────────────────────────────────────
         let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
-        let (dom1, dom1_h_in_dom0) = make_sealed_child(&dom0);
-        let (dom2, _) = make_sealed_child(&dom0);
+        let setup = common::TestPlatform::new();
+        let (dom1, dom1_h_in_dom0) = make_sealed_child(&setup, &dom0);
+        let (dom2, _) = make_sealed_child(&setup, &dom0);
         let dom2_id = dom2.read().data.id;
 
         // dom0 has two Running VPs: one on core 0, one on core 1.

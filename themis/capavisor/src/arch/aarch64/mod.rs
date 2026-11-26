@@ -20,6 +20,14 @@ pub mod vectors;
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.
 pub use arch_state::{complete_revoke_switch, flush_tlb_handle, ArchDomainState, ArchPlatformState};
 
+pub(crate) unsafe fn complete_vp_handoff(
+    _platform: &crate::platform::ThemisPlatform,
+    _context: &capability_engine::SwitchContext,
+    _handoff: capability_engine::VpHandoff,
+) {
+    unimplemented!("VP hardware handoff: aarch64 backend not yet implemented")
+}
+
 // IOMMU device-assignment stubs (no SMMU yet).
 #[allow(unused_variables)]
 pub fn assign_device(_p: &crate::platform::ThemisPlatform, bdf: u16, domain_id: capability_engine::DomainId) {}

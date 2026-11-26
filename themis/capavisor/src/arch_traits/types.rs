@@ -64,6 +64,7 @@ impl From<CapaError> for HypercallResult {
             CapaError::NotSupported | CapaError::RegisterOutOfRange => themis_abi::errors::ERR_UNIMPL,
 
             CapaError::NoMemory => themis_abi::errors::ERR_NOMEM,
+            CapaError::NotificationQueueFull => themis_abi::errors::ERR_BUSY,
         };
         HypercallResult::error(code)
     }

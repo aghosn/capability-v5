@@ -1,14 +1,14 @@
 //! Capability-engine hypercalls.
 //!
-//! Tree-shape operations:        CARVE / ALIAS / SEND / ACCEPT / REJECT
-//! Channel transfer:             GET_CHAN / SEND_CHAN / ACCEPT_CHAN
-//! Domain lifecycle:             CREATE / SEAL / REVOKE_MEM / REVOKE_DOMAIN
+//! Tree-shape operations:        CARVE / ALIAS / SEND / ACCEPT / REJECT / REVOKE
+//! Channel creation:             GET_CHAN
+//! Domain lifecycle:             CREATE / SEAL
 //! Self-mapping:                 MAP_SELF
 //! Policy:                       SET_POLICY (all PolicyIdentifier variants)
 //! Device assignment:            ASSIGN_DEVICE / RELEASE_DEVICE
 //!
 //! Most handlers are thin wrappers around `capability_engine::Capability::*`
-//! via the `execute_or_return!` macro. Only `do_revoke_domain`, `do_assign_device`
+//! via engine-managed transactions. Only `do_assign_device`
 //! and `do_release_device` touch arch-specific state (IOMMU IRTEs / device
 //! assignment) through `crate::arch::x86_64::iommu_ir`.
 
@@ -51,7 +51,7 @@ pub(super) fn do_alias(
     Ok(HypercallResult::success_2(handle, sub))
 }
 
-/// SEND (0x03): send memory capability to a receiver domain.
+/// SEND (0x03): send a capability to a receiver domain or channel.
 /// arg3 (RCX) = child GPA; u64::MAX means identity-map (GPA = HPA).
 /// 0 is a valid explicit GPA (maps memory at the bottom of the child's
 /// address space), so the sentinel must not be 0.
@@ -80,7 +80,7 @@ pub(super) fn do_send(
     Ok(HypercallResult::success())
 }
 
-/// ACCEPT (0x04): accept a pending memory capability.
+/// ACCEPT (0x04): accept a pending capability.
 pub(super) fn do_accept(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -90,7 +90,7 @@ pub(super) fn do_accept(
     Ok(HypercallResult::success_1(handle))
 }
 
-/// REJECT (0x05): reject a pending memory capability.
+/// REJECT (0x05): reject a pending capability.
 pub(super) fn do_reject(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -114,34 +114,6 @@ pub(super) fn do_get_chan(
     } else {
         Capability::get_chan(platform, caller, domain_handle)?
     };
-    Ok(HypercallResult::success_1(handle))
-}
-
-/// SEND_CHAN (0x20): send a channel capability to a receiver domain.
-pub(super) fn do_send_chan(
-    platform: &ThemisPlatform,
-    caller: &CapabilityRef<Domain>,
-    chan_handle: u64,
-    receiver_handle: u64,
-    attrs: u64,
-) -> Result<HypercallResult, CapaError> {
-    let _batch = Capability::send_channel(
-        platform,
-        caller,
-        chan_handle,
-        receiver_handle,
-        Attributes::from_bits(attrs as u8),
-    )?;
-    Ok(HypercallResult::success())
-}
-
-/// ACCEPT_CHAN (0x21): accept a pending channel capability.
-pub(super) fn do_accept_chan(
-    platform: &ThemisPlatform,
-    caller: &CapabilityRef<Domain>,
-    pending_id: u64,
-) -> Result<HypercallResult, CapaError> {
-    let (handle, _batch) = Capability::accept_channel(platform, caller, pending_id)?;
     Ok(HypercallResult::success_1(handle))
 }
 
@@ -176,8 +148,8 @@ pub(super) fn do_seal(
     Ok(HypercallResult::success())
 }
 
-/// REVOKE_MEM (0x08): revoke a child of a memory capability.
-pub(super) fn do_revoke_mem(
+/// REVOKE (0x08): revoke a tree child, or an owned domain when child_sub is zero.
+pub(super) fn do_revoke(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     parent_handle: u64,
@@ -186,22 +158,6 @@ pub(super) fn do_revoke_mem(
     let _batch = Capability::revoke(platform, caller, parent_handle, child_sub)?;
     Ok(HypercallResult::success())
 }
-
-/// REVOKE_DOMAIN (0x09): revoke an entire child domain.
-pub(super) fn do_revoke_domain(
-    platform: &ThemisPlatform,
-    caller: &CapabilityRef<Domain>,
-    child_handle: u64,
-) -> Result<HypercallResult, CapaError> {
-    // IRTE invalidation for the revoked domain is handled by
-    // `ThemisPlatform::on_domain_revoked`, which the engine calls under its
-    // own op-lock as part of `revoke_domain`'s `execute()` -- no need to
-    // resolve the child handle again here (that would be an unsynchronized
-    // read of tree state after the lock has already been released).
-    let _batch = Capability::revoke_domain(platform, caller, child_handle)?;
-    Ok(HypercallResult::success())
-}
-
 
 /// MAP_SELF (0x1f): remap a memory capability at a new GPA within the caller's space.
 ///
@@ -235,25 +191,63 @@ pub(super) fn do_set_policy(
 ) -> Result<HypercallResult, CapaError> {
     use themis_abi::policy_kind;
 
+    let (kind, vp, emulate_word) = policy_kind::decode(kind).ok_or(CapaError::InvalidValue)?;
+    let scope = vp.map_or(capability_engine::PolicyScope::Domain, |id| {
+        capability_engine::PolicyScope::Vp(u64::from(id))
+    });
+    match kind {
+        policy_kind::CORES
+        | policy_kind::API_MONITOR
+        | policy_kind::DEFAULT_INTR_VISIBILITY
+        | policy_kind::DEFAULT_EXIT_TRAP
+        | policy_kind::CPUID_DEFAULT
+        | policy_kind::MSR_DEFAULT
+        | policy_kind::DEFAULT_VECTOR_INJECTABLE
+            if key != 0 || sub_key != 0 =>
+        {
+            return Err(CapaError::InvalidValue);
+        }
+        policy_kind::VECTOR_VISIBILITY
+        | policy_kind::VECTOR_INJECTABLE
+        | policy_kind::EXIT_REASON_TRAP
+            if sub_key != 0 =>
+        {
+            return Err(CapaError::InvalidValue);
+        }
+        policy_kind::DEFAULT_INTR_REG_READ_SET
+        | policy_kind::DEFAULT_INTR_REG_WRITE_SET
+        | policy_kind::DEFAULT_EXIT_REG_READ_SET
+        | policy_kind::DEFAULT_EXIT_REG_WRITE_SET
+            if key != 0 =>
+        {
+            return Err(CapaError::InvalidValue);
+        }
+        _ => {}
+    }
     let id = match kind {
         policy_kind::CORES => PolicyIdentifier::Cores,
         policy_kind::API_MONITOR => PolicyIdentifier::ApiMonitor,
         policy_kind::DEFAULT_INTR_VISIBILITY => PolicyIdentifier::DefaultInterruptVisibility,
-        policy_kind::VECTOR_VISIBILITY => PolicyIdentifier::VectorVisibility(key as u8),
+        policy_kind::DEFAULT_INTR_REG_READ_SET => PolicyIdentifier::DefaultInterruptRegReadSet(u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?),
+        policy_kind::DEFAULT_INTR_REG_WRITE_SET => PolicyIdentifier::DefaultInterruptRegWriteSet(u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?),
+        policy_kind::DEFAULT_VECTOR_INJECTABLE => PolicyIdentifier::DefaultVectorInjectable,
+        policy_kind::VECTOR_VISIBILITY => PolicyIdentifier::VectorVisibility(u8::try_from(key).map_err(|_| CapaError::InvalidValue)?),
         policy_kind::VECTOR_REG_READ_SET => {
-            PolicyIdentifier::VectorRegReadSet(key as u8, sub_key as u8)
+            PolicyIdentifier::VectorRegReadSet(u8::try_from(key).map_err(|_| CapaError::InvalidValue)?, u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?)
         }
         policy_kind::VECTOR_REG_WRITE_SET => {
-            PolicyIdentifier::VectorRegWriteSet(key as u8, sub_key as u8)
+            PolicyIdentifier::VectorRegWriteSet(u8::try_from(key).map_err(|_| CapaError::InvalidValue)?, u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?)
         }
-        policy_kind::VECTOR_INJECTABLE => PolicyIdentifier::VectorInjectable(key as u8),
+        policy_kind::VECTOR_INJECTABLE => PolicyIdentifier::VectorInjectable(u8::try_from(key).map_err(|_| CapaError::InvalidValue)?),
         policy_kind::DEFAULT_EXIT_TRAP => PolicyIdentifier::DefaultExitTrap,
-        policy_kind::EXIT_REASON_TRAP => PolicyIdentifier::ExitReasonTrap(key as u32),
+        policy_kind::DEFAULT_EXIT_REG_READ_SET => PolicyIdentifier::DefaultExitRegReadSet(u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?),
+        policy_kind::DEFAULT_EXIT_REG_WRITE_SET => PolicyIdentifier::DefaultExitRegWriteSet(u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?),
+        policy_kind::EXIT_REASON_TRAP => PolicyIdentifier::ExitReasonTrap(u32::try_from(key).map_err(|_| CapaError::InvalidValue)?),
         policy_kind::EXIT_REASON_REG_READ_SET => {
-            PolicyIdentifier::ExitReasonRegReadSet(key as u32, sub_key as u8)
+            PolicyIdentifier::ExitReasonRegReadSet(u32::try_from(key).map_err(|_| CapaError::InvalidValue)?, u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?)
         }
         policy_kind::EXIT_REASON_REG_WRITE_SET => {
-            PolicyIdentifier::ExitReasonRegWriteSet(key as u32, sub_key as u8)
+            PolicyIdentifier::ExitReasonRegWriteSet(u32::try_from(key).map_err(|_| CapaError::InvalidValue)?, u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?)
         }
         policy_kind::CPUID_DEFAULT => {
             PolicyIdentifier::ProcFeatureDefault(ResourceKind::Cpuid)
@@ -271,22 +265,58 @@ pub(super) fn do_set_policy(
             let leaf = (key >> 32) as u32;
             let subleaf = key as u32;
             PolicyIdentifier::ProcFeatureEmulate(
-                ResourceKind::Cpuid, leaf, subleaf, sub_key as u8,
+                ResourceKind::Cpuid, leaf, subleaf, u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?,
             )
         }
+        policy_kind::CPUID_EMULATE_RANGE => PolicyIdentifier::ProcFeatureEmulateRange(
+            ResourceKind::Cpuid,
+            (key >> 32) as u32,
+            key as u32,
+            (sub_key >> 32) as u32,
+            sub_key as u32,
+            emulate_word,
+        ),
+        policy_kind::MSR_EMULATE_RANGE => PolicyIdentifier::ProcFeatureEmulateRange(
+            ResourceKind::Msr,
+            u32::try_from(key).map_err(|_| CapaError::InvalidValue)?,
+            0,
+            u32::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?,
+            0,
+            emulate_word,
+        ),
         policy_kind::MSR_DEFAULT => {
             PolicyIdentifier::ProcFeatureDefault(ResourceKind::Msr)
         }
         policy_kind::MSR_RANGE => {
-            PolicyIdentifier::ProcFeatureRange(ResourceKind::Msr, key as u32, 0, sub_key as u32, 0)
+            PolicyIdentifier::ProcFeatureRange(ResourceKind::Msr, u32::try_from(key).map_err(|_| CapaError::InvalidValue)?, 0, u32::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?, 0)
         }
         policy_kind::MSR_EMULATE => {
-            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key as u32, 0, sub_key as u8)
+            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, u32::try_from(key).map_err(|_| CapaError::InvalidValue)?, 0, u8::try_from(sub_key).map_err(|_| CapaError::InvalidValue)?)
         }
         _ => return Ok(HypercallResult::error(errors::ERR_INVALID)),
     };
 
-    let _batch = Capability::set_policy(platform, caller, child_handle, id, value)?;
+    if value == policy_kind::INHERIT
+        && matches!(
+            id,
+            PolicyIdentifier::ProcFeatureDefault(_)
+                | PolicyIdentifier::DefaultExitTrap
+                | PolicyIdentifier::DefaultInterruptVisibility
+        )
+    {
+        let capability_engine::PolicyScope::Vp(vp) = scope else {
+            return Err(CapaError::InvalidValue);
+        };
+        Capability::clear_vp_policy(
+            platform,
+            caller,
+            child_handle,
+            vp,
+            id.execution_kind().ok_or(CapaError::InvalidValue)?,
+        )?;
+    } else {
+        Capability::set_policy_scoped(platform, caller, child_handle, scope, id, value)?;
+    }
     Ok(HypercallResult::success())
 }
 
@@ -329,4 +359,3 @@ pub(super) fn do_release_device(platform: &ThemisPlatform, bdf_arg: u64) -> Resu
     platform.release_device(bdf);
     Ok(HypercallResult::success())
 }
-

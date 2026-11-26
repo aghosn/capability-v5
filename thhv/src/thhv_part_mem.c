@@ -89,6 +89,44 @@ unsigned int thhv_ept_meta_needed(u64 gpa, u64 size)
 	return n;
 }
 
+int thhv_send_ept_meta(struct thhv_partition *part, unsigned int nr_pages)
+{
+	struct thhv_ept_meta_allocation *allocation;
+	struct page **pages;
+	unsigned int i;
+	int ret;
+
+	allocation = kmalloc(sizeof(*allocation), GFP_KERNEL);
+	if (!allocation)
+		return -ENOMEM;
+
+	pages = kcalloc(nr_pages, sizeof(*pages), GFP_KERNEL);
+	if (!pages) {
+		kfree(allocation);
+		return -ENOMEM;
+	}
+
+	allocation->order = get_order((unsigned long)nr_pages * PAGE_SIZE);
+	allocation->head = alloc_pages(GFP_KERNEL | __GFP_ZERO,
+				       allocation->order);
+	if (!allocation->head) {
+		kfree(pages);
+		kfree(allocation);
+		return -ENOMEM;
+	}
+	for (i = 0; i < nr_pages; i++)
+		pages[i] = allocation->head + i;
+
+	/* Retain backing until domain revocation, even if SEND rollback fails. */
+	spin_lock(&part->mem.lock);
+	list_add_tail(&allocation->list, &part->ept_meta_allocations);
+	spin_unlock(&part->mem.lock);
+
+	ret = thhv_send_meta_pages(part, pages, nr_pages, THHV_META_KEY_EPT);
+	kfree(pages);
+	return ret;
+}
+
 long thhv_set_guest_memory(struct thhv_partition *part,
 			   void __user *uarg)
 {
@@ -107,20 +145,6 @@ long thhv_set_guest_memory(struct thhv_partition *part,
 		return -EINVAL;
 	if (gm.userspace_addr & ~PAGE_MASK)
 		return -EINVAL;
-
-	/* Guard: GPA 0xFEE00000 is owned by capavisor for LAPIC virtualization.
-	 * CHV must not map guest memory overlapping this range. */
-	{
-		u64 req_start = gm.guest_pfn << PAGE_SHIFT;
-		u64 req_end   = req_start + gm.size;
-		u64 lap_end   = THHV_LAPIC_GPA + PAGE_SIZE;
-
-		if (req_start < lap_end && req_end > THHV_LAPIC_GPA) {
-			pr_err("thhv: SET_GUEST_MEMORY GPA [0x%llx, 0x%llx) overlaps LAPIC range [0x%llx, 0x%llx)\n",
-			       req_start, req_end, THHV_LAPIC_GPA, lap_end);
-			return -EINVAL;
-		}
-	}
 
 	nr_pages = gm.size >> PAGE_SHIFT;
 
@@ -145,10 +169,10 @@ long thhv_set_guest_memory(struct thhv_partition *part,
 		spin_lock(&part->sent_caps.lock);
 		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
 			if (sc->region_key == gm.guest_pfn) {
-				ret = themis_revoke_mem(sc->parent_handle,
-						       sc->sub_handle);
+				ret = themis_revoke(sc->parent_handle,
+						    sc->sub_handle);
 				if (ret)
-					pr_warn("thhv: REVOKE_MEM parent=%llu sub=%llu pfn 0x%llx failed (%d)\n",
+					pr_warn("thhv: REVOKE parent=%llu sub=%llu pfn 0x%llx failed (%d)\n",
 						sc->parent_handle,
 						sc->sub_handle,
 						gm.guest_pfn, ret);
@@ -211,7 +235,7 @@ long thhv_set_guest_memory(struct thhv_partition *part,
 	}
 
 	/*
-	 * Translate pinned dom0 GPAs → real HPAs.
+	 * Translate pinned caller GPAs → real HPAs.
 	 * Produces one or more contiguous HPA segments.
 	 * Falls through as identity (GPA==HPA) when no PA map is loaded.
 	 */
@@ -226,68 +250,17 @@ long thhv_set_guest_memory(struct thhv_partition *part,
 	/*
 	 * Send EPT META pages to the child so the capavisor can allocate
 	 * intermediate EPT page-table pages when mapping this region.
-	 * Kernel-allocated pages are tracked in part->ept_meta_pages and
+	 * Kernel-allocated blocks are tracked in part->ept_meta_allocations and
 	 * freed on partition teardown.
 	 */
 	{
 		u64 child_gpa = gm.guest_pfn << PAGE_SHIFT;
 		unsigned int nr_ept_meta = thhv_ept_meta_needed(child_gpa,
 								gm.size);
-		struct page **ept_pages;
-		struct page *compound;
-		unsigned int j, order;
 
-		ept_pages = kcalloc(nr_ept_meta, sizeof(struct page *),
-				    GFP_KERNEL);
-		if (!ept_pages) {
-			ret = -ENOMEM;
+		ret = thhv_send_ept_meta(part, nr_ept_meta);
+		if (ret)
 			goto err_free_segs;
-		}
-
-		order = get_order(nr_ept_meta * PAGE_SIZE);
-		compound = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
-		if (!compound) {
-			kfree(ept_pages);
-			ret = -ENOMEM;
-			goto err_free_segs;
-		}
-		for (j = 0; j < nr_ept_meta; j++)
-			ept_pages[j] = compound + j;
-
-		ret = thhv_send_meta_pages(part, ept_pages, nr_ept_meta,
-					   THHV_META_KEY_EPT);
-		if (ret) {
-			__free_pages(compound, order);
-			kfree(ept_pages);
-			goto err_free_segs;
-		}
-
-		/*
-		 * Accumulate EPT META pages.  If we already have some from a
-		 * previous SET_GUEST_MEMORY call, grow the array.
-		 */
-		if (part->ept_meta_pages) {
-			struct page **merged;
-			unsigned int total = part->ept_meta_nr_pages + nr_ept_meta;
-
-			merged = krealloc(part->ept_meta_pages,
-					  total * sizeof(struct page *),
-					  GFP_KERNEL);
-			if (!merged) {
-				/* Pages already sent — just leak tracking. */
-				kfree(ept_pages);
-				ret = -ENOMEM;
-				goto err_free_segs;
-			}
-			memcpy(merged + part->ept_meta_nr_pages, ept_pages,
-			       nr_ept_meta * sizeof(struct page *));
-			kfree(ept_pages);
-			part->ept_meta_pages = merged;
-			part->ept_meta_nr_pages = total;
-		} else {
-			part->ept_meta_pages = ept_pages;
-			part->ept_meta_nr_pages = nr_ept_meta;
-		}
 
 		pr_debug("thhv: sent %u EPT META pages for domain 0x%llx\n",
 			 nr_ept_meta, part->domain_handle);
@@ -368,8 +341,7 @@ long thhv_set_guest_memory(struct thhv_partition *part,
 							     segs[i].hpa_start,
 							     segs[i].size);
 				if (ret) {
-					themis_revoke_mem(parent_handle,
-							 cap_sub);
+					themis_revoke(parent_handle, cap_sub);
 					goto err_revoke_partial;
 				}
 			}
@@ -379,7 +351,7 @@ long thhv_set_guest_memory(struct thhv_partition *part,
 						    segs[i].hpa_start,
 						    segs[i].size);
 			if (ret) {
-				themis_revoke_mem(parent_handle, cap_sub);
+				themis_revoke(parent_handle, cap_sub);
 				goto err_revoke_partial;
 			}
 
@@ -388,7 +360,7 @@ long thhv_set_guest_memory(struct thhv_partition *part,
 					     gm.attrs,
 					     child_gpa_cursor);
 			if (ret) {
-				themis_revoke_mem(parent_handle, cap_sub);
+				themis_revoke(parent_handle, cap_sub);
 				thhv_cap_table_remove(cap_handle);
 				goto err_revoke_partial;
 			}
@@ -434,8 +406,7 @@ err_revoke_all:
 		spin_lock(&part->sent_caps.lock);
 		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
 			if (sc->region_key == gm.guest_pfn) {
-				themis_revoke_mem(sc->parent_handle,
-						 sc->sub_handle);
+				themis_revoke(sc->parent_handle, sc->sub_handle);
 				list_del(&sc->list);
 				kfree(sc);
 			}
@@ -452,8 +423,7 @@ err_revoke_partial:
 		spin_lock(&part->sent_caps.lock);
 		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
 			if (sc->region_key == gm.guest_pfn) {
-				themis_revoke_mem(sc->parent_handle,
-						 sc->sub_handle);
+				themis_revoke(sc->parent_handle, sc->sub_handle);
 				list_del(&sc->list);
 				kfree(sc);
 			}
@@ -539,14 +509,14 @@ int thhv_send_meta_pages(struct thhv_partition *part,
 					    cap_sub, run_hpa,
 					    (u64)run_len * PAGE_SIZE);
 		if (ret) {
-			themis_revoke_mem(parent_handle, cap_sub);
+			themis_revoke(parent_handle, cap_sub);
 			goto err_revoke;
 		}
 
 		ret = themis_send(cap_handle, part->domain_handle,
 				  THHV_MEM_A_META);
 		if (ret) {
-			themis_revoke_mem(parent_handle, cap_sub);
+			themis_revoke(parent_handle, cap_sub);
 			thhv_cap_table_remove(cap_handle);
 			pr_err("thhv: META run[%u+%u] SEND failed (%d)\n",
 			       i, run_len, ret);
@@ -584,8 +554,7 @@ err_revoke:
 		spin_lock(&part->sent_caps.lock);
 		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
 			if (sc->region_key == region_key) {
-				themis_revoke_mem(sc->parent_handle,
-						 sc->sub_handle);
+				themis_revoke(sc->parent_handle, sc->sub_handle);
 				list_del(&sc->list);
 				kfree(sc);
 			}
@@ -607,7 +576,7 @@ err_revoke:
  * thhv_partitions_lock — the lock-order convention is partitions_lock → mem.lock
  * (no inverse code path exists; register/unregister never hold mem.lock).
  */
-void thhv_collect_carved_runs(struct thhv_partition *part,
+int thhv_collect_carved_runs(struct thhv_partition *part,
 			      struct thhv_debug_hpa_range *scratch,
 			      u32 cap,
 			      u32 *nr_total,
@@ -628,7 +597,13 @@ void thhv_collect_carved_runs(struct thhv_partition *part,
 			continue;
 
 		for (i = 0; i < r->nr_pages; i++) {
-			u64 hpa = (u64)page_to_pfn(r->pages[i]) << PAGE_SHIFT;
+			u64 gpa = (u64)page_to_pfn(r->pages[i]) << PAGE_SHIFT;
+			u64 hpa = thhv_gpa_to_hpa(gpa);
+
+			if (hpa == (u64)-1) {
+				spin_unlock(&part->mem.lock);
+				return -EFAULT;
+			}
 
 			if (*cur_pages &&
 			    hpa == *cur_hpa + (*cur_pages << PAGE_SHIFT)) {
@@ -648,4 +623,5 @@ void thhv_collect_carved_runs(struct thhv_partition *part,
 		}
 	}
 	spin_unlock(&part->mem.lock);
+	return 0;
 }

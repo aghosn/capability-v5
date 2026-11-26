@@ -82,6 +82,24 @@ make guest COPY_TO_GUEST=/root      # build + copy to guest
 
 The Makefile automatically builds `libthemis.a` via Cargo before invoking kbuild.
 
+## Running in other domains
+
+The driver discovers its own domain identity, capabilities and address mappings.
+It does not require dom0 or an injected self-domain capability. DomainComm pages
+are discovered individually through CPUID, so host backing can be scattered.
+Async doorbell `vp` arguments name Linux logical CPUs; the driver discovers and
+uses the corresponding native Themis VP IDs.
+
+Ring growth requires the monitor's synchronous-growth feature. Mappings are
+prepared before adoption; committed backing persists across driver reloads.
+The debug HPA mmap interface requires `MAP_SHARED` and translates each HPA to
+this domain's GPA, rejecting addresses absent from its map.
+
+For growth/notification integration testing, build with
+`make KDIR=/path/to/headers KCFLAGS=-DCONFIG_THHV_TEST all tests`, load that
+module, then run `test/bin/test_doorbell_eventfd --grow`. The regular invocation
+does not require the test-only growth ioctl.
+
 ## Status
 
 - **Device ioctls**: `THHV_CREATE_PARTITION` (→ `CREATE_DOMAIN`),
@@ -90,8 +108,11 @@ The Makefile automatically builds `libthemis.a` via Cargo before invoking kbuild
   + `SEAL`), `THHV_CREATE_VP`, partition cleanup (→ `REVOKE_DOMAIN`)
 - **VP ioctls**: `THHV_CREATE_VP` (pins per-VP META + COMM pages),
   `THHV_GET_VP_STATE` / `THHV_SET_VP_STATE` (→ `GET_REG` / `SET_REG`)
-- **Remaining stubs**: `THHV_RUN_VP`, `THHV_SET_GUEST_MEMORY`, `THHV_IRQFD`,
-  `THHV_IOEVENTFD`, VP `mmap()`
+- **Doorbells**: immutable capability endpoints, generic ownership operations,
+  recipient-port eventfd subscriptions and all-online-CPU interrupt vectors.
+  The old `THHV_IOEVENTFD` ioctl is removed; CHV matches ordinary device writes
+  in userspace. `THHV_RUN_VP`, `THHV_SET_GUEST_MEMORY` and `THHV_IRQFD` are
+  implemented; see `todo.md` for current limitations.
 
 See `todo.md` (Phase 15) for the full implementation roadmap.
 

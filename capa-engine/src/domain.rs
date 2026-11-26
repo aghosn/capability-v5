@@ -54,14 +54,16 @@ impl MonitorAPI {
     pub const REVOKE: u16 = 1 << 10;
     pub const GETCHAN: u16 = 1 << 11;
     pub const RECEIVE_AFTER_SEAL: u16 = 1 << 12;
+    pub const CREATE_DOORBELL: u16 = 1 << 14;
+    pub const NOTIFY: u16 = 1 << 15;
     #[cfg(feature = "address_translation")]
     pub const MAP_SELF: u16 = 1 << 13;
 
     /// All operations allowed (including receive_after_seal)
     #[cfg(not(feature = "address_translation"))]
-    pub const ALL: Self = MonitorAPI { bits: 0x1FFF };
+    pub const ALL: Self = MonitorAPI { bits: 0xDFFF };
     #[cfg(feature = "address_translation")]
-    pub const ALL: Self = MonitorAPI { bits: 0x3FFF };
+    pub const ALL: Self = MonitorAPI { bits: 0xFFFF };
 
     /// No operations allowed
     pub const NONE: Self = MonitorAPI { bits: 0 };
@@ -74,9 +76,9 @@ impl MonitorAPI {
     /// Create from raw bits
     pub const fn from_bits(bits: u16) -> Self {
         #[cfg(not(feature = "address_translation"))]
-        let mask = 0x1FFF;
+        let mask = 0xDFFF;
         #[cfg(feature = "address_translation")]
-        let mask = 0x3FFF;
+        let mask = 0xFFFF;
         MonitorAPI {
             bits: bits & mask,
         }
@@ -277,17 +279,9 @@ impl VectorPolicy {
     /// default; a domain that genuinely owns/wants visibility into a
     /// specific vector opts in per-vector via `default_report()`.
     ///
-    /// `read_set`/`write_set` are kept `ALL` (not `NONE`) despite the
-    /// interrupt-forwarding docs above suggesting they're about
-    /// interrupt-time register access: `register_access_check`
-    /// (`domain_api.rs`) also falls back to *this exact* `default`
-    /// `VectorPolicy` (via the `VECTOR_AVAILABLE` pseudo-vector) to gate
-    /// ordinary `GET_REG`/`SET_REG` on a VP that hasn't run yet or is
-    /// `Locked` — i.e. the read/write bitmaps here are a dual-purpose,
-    /// domain-wide default register-access gate, not solely an
-    /// interrupt-visibility concern. `NONE` here would (and did, before
-    /// this was caught) deny CHV's initial register setup on every
-    /// freshly-created VP domain-wide.
+    /// Runtime register masks retain the unrestricted default for compatibility;
+    /// confidential profiles explicitly set them to `NONE`. Initial register
+    /// setup is authorized separately while the domain is unsealed.
     pub fn default_not_report() -> Self {
         VectorPolicy {
             visibility: InterruptVisibility::NotReport,
@@ -358,7 +352,7 @@ impl ExitAction {
 }
 
 /// VMEXIT routing policy: default action + per-exit-reason overrides.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitPolicy {
     /// Default action for all exit reasons not explicitly overridden
     pub default: ExitAction,
@@ -503,7 +497,21 @@ pub enum ResourceKind {
     Msr = 1,
 }
 
-/// Identifier for a domain-wide policy field, used by `set_policy` / `get_policy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyScope {
+    Domain,
+    Vp(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionPolicyKind {
+    Cpuid,
+    Msr,
+    Exits,
+    Interrupts,
+}
+
+/// Policy field used by domain-default and VP-scoped `set_policy` / `get_policy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyIdentifier {
     /// Bitmask of allowed physical cores (bit i = core i).
@@ -513,6 +521,9 @@ pub enum PolicyIdentifier {
     /// Default interrupt-visibility for all vectors not explicitly overridden.
     /// Value: 0 = Deliver, 1 = Report, 2 = NotReport.
     DefaultInterruptVisibility,
+    DefaultInterruptRegReadSet(u8),
+    DefaultInterruptRegWriteSet(u8),
+    DefaultVectorInjectable,
     /// Per-vector interrupt visibility override.
     /// Value: 0 = Deliver, 1 = Report, 2 = NotReport.
     /// Use vector = [`VECTOR_AVAILABLE`] (0xFF) for the "VP available" synthetic entry.
@@ -529,9 +540,10 @@ pub enum PolicyIdentifier {
     VectorInjectable(u8),
 
     // ── VMEXIT exit policy identifiers ──
-
     /// Default exit trap policy. Value: 0 = handle locally, 1 = trap to parent.
     DefaultExitTrap,
+    DefaultExitRegReadSet(u8),
+    DefaultExitRegWriteSet(u8),
     /// Per-exit-reason trap policy. Value: 0 = handle locally, 1 = trap to parent.
     ExitReasonTrap(u32),
     /// Per-exit-reason register read bitmap (one word at a time).
@@ -542,7 +554,6 @@ pub enum PolicyIdentifier {
     ExitReasonRegWriteSet(u32, u8),
 
     // ── Processor feature interposition policy identifiers ──
-
     /// Set the default action for a resource class.
     /// Value: 0 = Trap, 1 = Native.
     ProcFeatureDefault(ResourceKind),
@@ -556,13 +567,82 @@ pub enum PolicyIdentifier {
     /// For MSR:   (msr, 0, word_index) — subleaf ignored.
     /// Value: packed emulated value (resource-specific encoding).
     ProcFeatureEmulate(ResourceKind, u32, u32, u8),
+    /// Insert/update an exact Emulate range, with the same word encoding as
+    /// `ProcFeatureEmulate`. Endpoints have the same encoding as `ProcFeatureRange`.
+    ProcFeatureEmulateRange(ResourceKind, u32, u32, u32, u32, u8),
 }
+
+impl PolicyIdentifier {
+    pub fn execution_kind(self) -> Option<ExecutionPolicyKind> {
+        match self {
+            Self::ProcFeatureDefault(ResourceKind::Cpuid)
+            | Self::ProcFeatureRange(ResourceKind::Cpuid, ..)
+            | Self::ProcFeatureEmulateRange(ResourceKind::Cpuid, ..)
+            | Self::ProcFeatureEmulate(ResourceKind::Cpuid, ..) => Some(ExecutionPolicyKind::Cpuid),
+            Self::ProcFeatureDefault(ResourceKind::Msr)
+            | Self::ProcFeatureRange(ResourceKind::Msr, ..)
+            | Self::ProcFeatureEmulateRange(ResourceKind::Msr, ..)
+            | Self::ProcFeatureEmulate(ResourceKind::Msr, ..) => Some(ExecutionPolicyKind::Msr),
+            Self::DefaultExitTrap
+            | Self::DefaultExitRegReadSet(_)
+            | Self::DefaultExitRegWriteSet(_)
+            | Self::ExitReasonTrap(_)
+            | Self::ExitReasonRegReadSet(..)
+            | Self::ExitReasonRegWriteSet(..) => Some(ExecutionPolicyKind::Exits),
+            Self::DefaultInterruptVisibility
+            | Self::DefaultInterruptRegReadSet(_)
+            | Self::DefaultInterruptRegWriteSet(_)
+            | Self::VectorVisibility(_)
+            | Self::VectorRegReadSet(..)
+            | Self::VectorRegWriteSet(..) => Some(ExecutionPolicyKind::Interrupts),
+            Self::Cores
+            | Self::ApiMonitor
+            | Self::VectorInjectable(_)
+            | Self::DefaultVectorInjectable => None,
+        }
+    }
+
+    pub(crate) fn validate(self) -> Result<()> {
+        match self {
+            Self::DefaultInterruptRegReadSet(word)
+            | Self::DefaultInterruptRegWriteSet(word)
+            | Self::DefaultExitRegReadSet(word)
+            | Self::DefaultExitRegWriteSet(word)
+            | Self::VectorRegReadSet(_, word)
+            | Self::VectorRegWriteSet(_, word)
+            | Self::ExitReasonRegReadSet(_, word)
+            | Self::ExitReasonRegWriteSet(_, word)
+                if word >= 3 =>
+            {
+                Err(CapaError::InvalidValue)
+            }
+            Self::ProcFeatureEmulate(_, _, _, word) if word >= 2 => Err(CapaError::InvalidValue),
+            Self::ProcFeatureEmulateRange(_, start, start_sub, end, end_sub, word)
+                if word >= 2 || (start, start_sub) > (end, end_sub) =>
+            {
+                Err(CapaError::InvalidValue)
+            }
+            Self::ProcFeatureEmulate(ResourceKind::Msr, _, sub, _) if sub != 0 => {
+                Err(CapaError::InvalidValue)
+            }
+            Self::ProcFeatureRange(ResourceKind::Msr, _, start_sub, _, end_sub)
+            | Self::ProcFeatureEmulateRange(ResourceKind::Msr, _, start_sub, _, end_sub, _)
+                if start_sub != 0 || end_sub != 0 =>
+            {
+                Err(CapaError::InvalidValue)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 pub struct VProcessorState {
     pub id: u64,
     /// Platform-specific state (e.g. saved register file; managed by the platform)
     pub platform_data: Vec<u8>,
     /// Scheduling / call-chain state
     pub run_state: RwLock<VpRunState>,
+    pub(crate) emulated_msrs: RwLock<BTreeMap<u32, u64>>,
 }
 
 impl core::fmt::Debug for VProcessorState {
@@ -580,12 +660,21 @@ impl VProcessorState {
             id,
             platform_data: Vec::new(),
             run_state: RwLock::new(VpRunState::Available { last_exit_reason: None }),
+            emulated_msrs: RwLock::new(BTreeMap::new()),
         }
     }
 }
 
 /// Reference-counted virtual processor handle.
 pub type VProcessorRef = Arc<VProcessorState>;
+
+#[derive(Debug, Clone, Default)]
+pub struct VpPolicyOverrides {
+    pub cpuid: Option<CpuidPolicy>,
+    pub msrs: Option<MsrPolicy>,
+    pub exits: Option<ExitPolicy>,
+    pub interrupts: Option<InterruptPolicy>,
+}
 
 /// Domain policies
 #[derive(Debug, Clone)]
@@ -607,6 +696,8 @@ pub struct DomainPolicy {
 
     /// MSR interposition policy
     pub msrs: MsrPolicy,
+
+    pub vp_policies: BTreeMap<u64, VpPolicyOverrides>,
 
     /// List of valid virtual processor states
     pub vprocessor_states: Vec<VProcessorRef>,
@@ -634,6 +725,7 @@ impl DomainPolicy {
             exits: ExitPolicy::new_default(ExitAction::default_local()),
             cpuid: CpuidPolicy::new(DefaultAction::Native),
             msrs: MsrPolicy::new(DefaultAction::Native),
+            vp_policies: BTreeMap::new(),
             vprocessor_states: Vec::new(),
             num_vprocessors: num_cores,
         }
@@ -655,6 +747,7 @@ impl DomainPolicy {
             exits: ExitPolicy::new_default(ExitAction::default_trap()),
             cpuid: CpuidPolicy::new(DefaultAction::Trap),
             msrs: MsrPolicy::new(DefaultAction::Trap),
+            vp_policies: BTreeMap::new(),
             vprocessor_states: Vec::new(),
             num_vprocessors: cores.count_ones() as usize,
         }
@@ -664,6 +757,59 @@ impl DomainPolicy {
     pub fn with_vp_count(mut self, n: usize) -> Self {
         self.num_vprocessors = n;
         self
+    }
+
+    pub fn cpuid_for(&self, vp: u64) -> &CpuidPolicy {
+        self.vp_policies
+            .get(&vp)
+            .and_then(|p| p.cpuid.as_ref())
+            .unwrap_or(&self.cpuid)
+    }
+
+    pub fn msrs_for(&self, vp: u64) -> &MsrPolicy {
+        self.vp_policies
+            .get(&vp)
+            .and_then(|p| p.msrs.as_ref())
+            .unwrap_or(&self.msrs)
+    }
+
+    pub fn exits_for(&self, vp: u64) -> &ExitPolicy {
+        self.vp_policies
+            .get(&vp)
+            .and_then(|p| p.exits.as_ref())
+            .unwrap_or(&self.exits)
+    }
+
+    pub fn interrupts_for(&self, vp: u64) -> &InterruptPolicy {
+        self.vp_policies
+            .get(&vp)
+            .and_then(|p| p.interrupts.as_ref())
+            .unwrap_or(&self.interrupts)
+    }
+
+    pub(crate) fn interrupt_action(&self, vp: u64, vector: u8) -> VectorPolicy {
+        let mut action = self.interrupts_for(vp).get_policy(vector).clone();
+        action.injectable = self.interrupts.get_policy(vector).injectable;
+        action
+    }
+
+    pub(crate) fn resolve_vp_policy(&self, vp: u64) -> Self {
+        let mut policy = self.clone();
+        policy.cpuid = self.cpuid_for(vp).clone();
+        policy.msrs = self.msrs_for(vp).clone();
+        policy.exits = self.exits_for(vp).clone();
+        policy.interrupts = self.interrupts_for(vp).clone();
+        policy
+    }
+
+    pub(crate) fn set_vp_category(&mut self, vp: u64, kind: ExecutionPolicyKind, policy: Self) {
+        let overrides = self.vp_policies.entry(vp).or_default();
+        match kind {
+            ExecutionPolicyKind::Cpuid => overrides.cpuid = Some(policy.cpuid),
+            ExecutionPolicyKind::Msr => overrides.msrs = Some(policy.msrs),
+            ExecutionPolicyKind::Exits => overrides.exits = Some(policy.exits),
+            ExecutionPolicyKind::Interrupts => overrides.interrupts = Some(policy.interrupts),
+        }
     }
 
     /// Check if domain can receive capabilities after sealing
@@ -730,6 +876,7 @@ pub struct Domain {
 
     /// Domain policies
     pub policy: DomainPolicy,
+    pub(crate) doorbell: Option<crate::doorbell::Doorbell>,
 
     /// Memory capabilities owned by this domain (handle -> weak ref)
     pub memory_capabilities: BTreeMap<LocalHandle, CapabilityWeak<MemoryRegion>>,
@@ -781,6 +928,7 @@ impl Domain {
         Domain {
             id,
             status: DomainStatus::Unsealed,
+            doorbell: None,
             policy,
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
@@ -805,6 +953,7 @@ impl Domain {
         let mut d = Domain {
             id: 0,
             status: DomainStatus::Sealed,
+            doorbell: None,
             policy: DomainPolicy::new_root(num_cores),
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
@@ -833,6 +982,7 @@ impl Domain {
         Domain {
             id: u64::MAX,
             status: DomainStatus::Unsealed,
+            doorbell: None,
             policy: DomainPolicy::new_restricted(0, MonitorAPI::NONE),
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
@@ -1031,6 +1181,7 @@ impl Domain {
     pub fn allocate_memory_handle(&self) -> LocalHandle {
         let mut handle: LocalHandle = 1;
         while self.memory_capabilities.contains_key(&handle)
+            || self.domain_capabilities.contains_key(&handle)
             || self.frozen_handles.contains(&handle)
         {
             handle += 1;
@@ -1040,11 +1191,7 @@ impl Domain {
 
     /// Allocate the next available handle for a domain capability
     pub fn allocate_domain_handle(&self) -> LocalHandle {
-        let mut handle: LocalHandle = 1;
-        while self.domain_capabilities.contains_key(&handle) {
-            handle += 1;
-        }
-        handle
+        self.allocate_memory_handle()
     }
 
     /// Freeze a memory handle (mark as sent but not yet accepted)

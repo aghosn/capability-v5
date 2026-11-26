@@ -63,7 +63,7 @@ pub fn launch(
         bsp_vmcs_phys,
         bsp_vapic_phys,
         bsp_msr_bitmap_phys,
-        0,
+        vmx.dom0.pid_phys(vmx.bsp_index),
         bsp_vpid,
     );
 

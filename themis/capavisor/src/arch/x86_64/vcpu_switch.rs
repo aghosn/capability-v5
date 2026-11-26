@@ -29,9 +29,10 @@ use crate::vcpu::ActiveVcpu;
 ///      Inter-Processor Interrupts (IPIs) target us.
 ///
 /// Caller obligations:
-///  - The capability engine must have already transitioned dst → `Running`
-///    and src → a non-`Running` state.  This helper does not touch
-///    cap-engine state.
+///  - The capability engine must have validated the transition and reserved
+///    both VPs against competing claims. Calls reserve dst as Running and
+///    src as Locked; returns retain src Running and dst Locked until this
+///    hardware handoff finishes. This helper does not touch engine state.
 ///  - All pre-work on the src VP (RIP advance, COMM-page marshalling, …)
 ///    must be done before calling.  Post-work on the dst VP runs on
 ///    `*vcpu` directly after this call returns.

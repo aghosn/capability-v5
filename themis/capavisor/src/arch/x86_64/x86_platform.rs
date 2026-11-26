@@ -67,6 +67,11 @@ impl ArchVpOps for X86Platform {
     const EXTERNAL_INTERRUPT_EXIT_REASON: u32 = 1; // VMX basic exit reason 1
 
     fn run(&mut self, vp: &mut Self::VpHandle) -> SemanticExit {
+        unsafe {
+            super::pid::PidPage::new(vp.pid_phys(), self.platform().hhdm_offset())
+                .set_ndst(super::apic::current_lapic_id());
+        }
+        super::hypercall::switch::drain_pir_on_interrupt_window(vp, self.platform());
         let exit_reason = match unsafe { vp.run() } {
             Ok(reason) => reason,
             Err(e) => {

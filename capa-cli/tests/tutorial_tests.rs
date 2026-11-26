@@ -62,6 +62,12 @@ fn run_tuto(name: &str) -> Result<(), String> {
     }
 }
 
+#[test]
+fn doorbell_examples_exercise_delivery_and_lifecycle() {
+    run_tuto("../examples/doorbells.txt").unwrap();
+    run_tuto("../examples/doorbell-lifecycle.txt").unwrap();
+}
+
 // ── Individual tutorial tests ───────────────────────────────────────────────
 
 #[test]

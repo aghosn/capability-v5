@@ -1,0 +1,34 @@
+init root 0x200000
+create-domain root child 0b1111 ALL
+# Provision a recipient doorbell before sealing the child.
+set-interrupt-policy child 0x93 DELIVER
+create-doorbell root child 0x93 async 0
+doorbells child
+seal child
+# EXPECT_FAIL
+create-doorbell root child 0x93 async 0
+# Root can ring the stopped child's endpoint without switching.
+notify root 0 3 5
+doorbells child
+
+# Reject unfreezes the sender's capability; revoking cancels an offer.
+create-doorbell root self 0x94 sync
+send-capability root 4 child
+enumerate-pending child
+reject-capability child 0
+send-capability root 4 child
+revoke root self 2
+enumerate-pending child
+# EXPECT_FAIL
+accept child 1
+# EXPECT_FAIL
+notify root 0 4 6
+
+# Sync cannot target a domain outside the caller chain.
+create-doorbell root self 0x94 sync
+# EXPECT_FAIL
+notify root 0 4 7
+revoke root self 3
+# Destroy the child's doorbell through its recipient-tree position.
+revoke root 2 1
+doorbells child

@@ -22,6 +22,31 @@ struct CommandInfo {
 
 const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
+        name: "create-doorbell",
+        usage: "create-doorbell <caller> <self|child> <vector> <sync|async vp>",
+        description: "Create an immutable recipient doorbell",
+    },
+    CommandInfo {
+        name: "send-capability",
+        usage: "send-capability <caller> <handle> <receiver>",
+        description: "Send any transferable capability by its local handle",
+    },
+    CommandInfo {
+        name: "accept",
+        usage: "accept <receiver> <pending_id>",
+        description: "Accept a capability and print its local handle",
+    },
+    CommandInfo {
+        name: "notify",
+        usage: "notify <caller> <core> <handle> <value>",
+        description: "Ring a held doorbell capability",
+    },
+    CommandInfo {
+        name: "doorbells",
+        usage: "doorbells <domain>",
+        description: "Show doorbells, queued values and pending interrupts",
+    },
+    CommandInfo {
         name: "init",
         usage: "init <name> <size>",
         description: "Initialize root domain and memory region",

@@ -92,7 +92,7 @@
   7. Store the GPA in `thhv_partition` for later reference.
 
 This happens alongside the channel provisioning already in place (get_chan +
-send_chan).
+send).
 
 **Order in `thhv_create_partition` (before seal)**:
 1. Create domain

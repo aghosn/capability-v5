@@ -23,6 +23,8 @@ pub mod bootstrap;
 pub mod capability;
 pub mod domain_api;
 pub mod domain;
+mod doorbell;
+pub use doorbell::{Doorbell, DoorbellKind, DoorbellNotification, SELF_CAPABILITY};
 pub mod error;
 pub mod interposition;
 pub mod memory;
@@ -36,26 +38,26 @@ pub mod view;
 pub mod translation;
 
 pub use attest::{
-    attest_memory_region, build_structured_attestation, enumerate_domain_tree,
-    DomCapInfo, MemCapInfo, PaMapInfo, StructuredAttestation,
+    attest_memory_region, build_structured_attestation, enumerate_domain_tree, DomCapInfo,
+    MemCapInfo, PaMapInfo, StructuredAttestation,
 };
 pub use capability::{
     compute_address_space, Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership,
     SubHandle,
 };
 pub use domain::{
-    Domain, DomainPolicy, DomainStatus, ExitAction, ExitPolicy,
+    Domain, DomainPolicy, DomainStatus, ExecutionPolicyKind, ExitAction, ExitPolicy,
     InterruptPolicy, InterruptVisibility, MonitorAPI, PendingDomainCapability, PolicyIdentifier,
-    RegBitmap, ResourceKind, VProcessorRef, VProcessorState, VectorPolicy, VpCallContext,
-    VpRunState, VECTOR_AVAILABLE,
+    PolicyScope, RegBitmap, ResourceKind, VProcessorRef, VProcessorState, VectorPolicy,
+    VpCallContext, VpPolicyOverrides, VpRunState, VECTOR_AVAILABLE,
 };
 pub use error::{CapaError, Result};
 pub use interposition::{
-    Cpuid, CpuidPolicy, CpuidResult, DefaultAction, InsertError, Msr, MsrPolicy,
+    Cpuid, CpuidPolicy, CpuidResult, DefaultAction, FeatureAction, InsertError, Msr, MsrPolicy,
     ProcFeature, ProcFeatureConfig, ProcFeaturePolicy,
 };
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
-pub use platform::{CoreSyncPoints, OpLockGuard, Platform, Semaphore};
+pub use platform::{CoreSyncPoints, OpLockGuard, Platform, Semaphore, VpHandoff};
 
 /// Test-only shim that exposes the crate-internal `execute()` wrapper for
 /// integration tests to validate lock discipline and update dispatch

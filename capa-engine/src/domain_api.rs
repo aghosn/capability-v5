@@ -29,15 +29,16 @@ use crate::attest::{self, StructuredAttestation};
 use crate::capability::{add_footprint, insert_view_aware, remove_footprint};
 use crate::capability::{Capability, CapabilityRef, LocalHandle, Ownership, SubHandle};
 use crate::domain::{
-    Domain, DomainPolicy, ExitAction, InterruptVisibility, MonitorAPI, PendingCapability,
-    PendingDomainCapability, PolicyIdentifier, RegBitmap, ResourceKind, VProcessorRef,
-    VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
+    Domain, DomainPolicy, DomainStatus, ExecutionPolicyKind, ExitAction, InterruptVisibility,
+    MonitorAPI, PendingCapability, PendingDomainCapability, PolicyIdentifier, PolicyScope,
+    RegBitmap, ResourceKind, VProcessorRef, VectorPolicy, VpCallContext, VpRunState,
+    VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
-use crate::interposition::{CpuidPolicy, CpuidResult, MsrPolicy, ProcFeaturePolicy};
+use crate::interposition::{CpuidPolicy, CpuidResult, FeatureAction, MsrPolicy, ProcFeaturePolicy};
 use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus};
-use crate::platform::{CoreSyncPoints, Platform};
-use crate::switch::{CoreUpdate, SwitchContext, VpInterruptContext};
+use crate::platform::{CoreSyncPoints, Platform, VpHandoff};
+use crate::switch::{CoreBinding, CoreContext, CoreUpdate, SwitchContext, VpInterruptContext};
 #[cfg(feature = "address_translation")]
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
 #[cfg(not(feature = "address_translation"))]
@@ -84,6 +85,215 @@ macro_rules! lock_two_domains_ordered {
             (a_w, b_w)
         };
     };
+}
+
+fn require_core_binding(
+    core: &CoreContext,
+    domain: &CapabilityRef<Domain>,
+    vp_id: u64,
+) -> Result<()> {
+    let binding = core
+        .current_binding()
+        .ok_or_else(|| CapaError::InvalidOperation("core has no current VP binding".to_string()))?;
+    if binding.vp_id != vp_id || !Arc::ptr_eq(&binding.domain, domain) {
+        return Err(CapaError::InvalidOperation(
+            "running VP does not match the current core binding".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Policy and actions for one VP exit, inside `Capability::with_vp_exit`.
+///
+/// The operation lock stays held while this context exists. Do not call
+/// mediated engine operations from the callback; use these methods instead.
+/// Forwarding consumes the context because it changes the active VP.
+pub struct VpExit<'a> {
+    platform: &'a dyn Platform,
+    domain: &'a CapabilityRef<Domain>,
+    vp: VProcessorRef,
+}
+
+impl<'a> VpExit<'a> {
+    fn new(platform: &'a dyn Platform, domain: &'a CapabilityRef<Domain>) -> Result<Self> {
+        let vp = running_vp(platform, &domain.read().data)?;
+        Ok(Self {
+            platform,
+            domain,
+            vp,
+        })
+    }
+
+    pub fn cpuid_action(&self, leaf: u32, subleaf: u32) -> FeatureAction<CpuidResult> {
+        self.domain
+            .read()
+            .data
+            .policy
+            .cpuid_for(self.vp.id)
+            .action(&(leaf, subleaf))
+    }
+
+    pub fn msr_action(&self, msr: u32) -> FeatureAction<u64> {
+        let domain = self.domain.read();
+        match domain.data.policy.msrs_for(self.vp.id).action(&msr) {
+            FeatureAction::Emulate(initial) => FeatureAction::Emulate(
+                self.vp
+                    .emulated_msrs
+                    .read()
+                    .get(&msr)
+                    .copied()
+                    .unwrap_or(initial),
+            ),
+            action => action,
+        }
+    }
+
+    pub fn exit_action(&self, reason: u32) -> ExitAction {
+        self.domain
+            .read()
+            .data
+            .policy
+            .exits_for(self.vp.id)
+            .get_action(reason)
+            .clone()
+    }
+
+    pub fn interrupt_action(&self, vector: u8) -> VectorPolicy {
+        self.domain
+            .read()
+            .data
+            .policy
+            .interrupt_action(self.vp.id, vector)
+    }
+
+    pub fn update_msr_emulate_value(&self, msr: u32, value: u64) -> Result<()> {
+        let domain = self.domain.read();
+        if !matches!(
+            domain.data.policy.msrs_for(self.vp.id).action(&msr),
+            FeatureAction::Emulate(_)
+        ) {
+            return Err(CapaError::NotFound);
+        }
+        self.vp.emulated_msrs.write().insert(msr, value);
+        Ok(())
+    }
+
+    pub fn forward(self, reason: u32) -> Result<SwitchContext> {
+        let core = self
+            .platform
+            .get_current_core()
+            .ok_or(CapaError::NotFound)?;
+        Capability::switch_domain_return(self.domain, core, self.platform, Some(reason))
+    }
+
+    pub fn deliver_interrupt(self, vector: u8) -> Result<SwitchContext> {
+        let core = self
+            .platform
+            .get_current_core()
+            .ok_or(CapaError::NotFound)?;
+        Ok(
+            Capability::prepare_vp_interrupt(self.platform, self.domain, core, vector, None)?
+                .commit(self.platform),
+        )
+    }
+}
+
+pub(crate) struct PreparedVpReturn {
+    pub context: SwitchContext,
+    core: Arc<CoreContext>,
+    source: VProcessorRef,
+    target: VProcessorRef,
+    exit_reason: Option<u32>,
+    read_set: RegBitmap,
+}
+
+pub(crate) struct PreparedVpInterrupt {
+    pub context: SwitchContext,
+    core: Arc<CoreContext>,
+    chain: Vec<(CapabilityRef<Domain>, u64, VProcessorRef)>,
+    vector: u8,
+    read_set: RegBitmap,
+}
+
+impl PreparedVpInterrupt {
+    pub(crate) fn commit(self, platform: &dyn Platform) -> SwitchContext {
+        let Self { context, core, chain, vector, read_set } = self;
+        if chain.len() == 1 {
+            return context;
+        }
+        platform.handoff_vp(&context, VpHandoff::Interrupt { vector, read_set });
+        let n = chain.len();
+        for i in 0..n - 1 {
+            let report = chain[i].0.read().data.policy.interrupts_for(chain[i].2.id)
+                .get_policy(vector).visibility == InterruptVisibility::Report;
+            let unlocks = if i == 0 { None } else {
+                Some(VpCallContext {
+                    domain: Arc::downgrade(&chain[i - 1].0),
+                    domain_id: chain[i - 1].1,
+                    vp_id: chain[i - 1].2.id,
+                })
+            };
+            *chain[i].2.run_state.write() = VpRunState::Waiting {
+                unlocks, vector, report, blocked: i != n - 2,
+            };
+        }
+        *chain[n - 1].2.run_state.write() = VpRunState::Running { core: context.core_id };
+        core.set_binding(chain[n - 1].0.clone(), chain[n - 1].2.id);
+        for entry in chain.iter().skip(1) {
+            let frame = core.pop_frame().expect("validated interrupt chain");
+            debug_assert_eq!((frame.domain_id, frame.vp_id), (entry.1, entry.2.id));
+        }
+        context
+    }
+}
+
+impl PreparedVpReturn {
+    pub(crate) fn commit(self, platform: &dyn Platform) -> SwitchContext {
+        platform.handoff_vp(
+            &self.context,
+            VpHandoff::Return { exit_reason: self.exit_reason, read_set: self.read_set },
+        );
+        self.core.set_binding(self.context.to_domain.clone(), self.target.id);
+        let frame = self.core.pop_frame().expect("validated return frame");
+        debug_assert_eq!(frame.vp_id, self.target.id);
+        debug_assert_eq!(frame.domain_id, self.context.to_domain.read().data.id);
+        *self.target.run_state.write() = VpRunState::Running { core: self.context.core_id };
+        *self.source.run_state.write() = VpRunState::Available {
+            last_exit_reason: self.exit_reason,
+        };
+        self.context
+    }
+}
+
+fn resolve_locked_caller(
+    frame: &VpCallContext,
+    callee: (DomainId, u64),
+) -> Result<(CapabilityRef<Domain>, VProcessorRef)> {
+    let domain = frame.domain.upgrade().ok_or(CapaError::PermissionDenied)?;
+    let vp = {
+        let d = domain.read();
+        if d.data.id != frame.domain_id || !d.data.is_sealed() {
+            return Err(CapaError::InvalidOperation(
+                "invalid domain in VP call chain".to_string(),
+            ));
+        }
+        d.data
+            .policy
+            .vprocessor_states
+            .get(frame.vp_id as usize)
+            .ok_or(CapaError::NotFound)?
+            .clone()
+    };
+    if !matches!(
+        &*vp.run_state.read(),
+        VpRunState::Locked { callee_domain_id, callee_vp_id }
+            if (*callee_domain_id, *callee_vp_id) == callee
+    ) {
+        return Err(CapaError::InvalidOperation(
+            "caller VP is not locked waiting for this callee".to_string(),
+        ));
+    }
+    Ok((domain, vp))
 }
 
 impl Capability<Domain> {
@@ -342,6 +552,7 @@ impl Capability<Domain> {
     ///   capability, `META` region may not be sent via non-META path, or `SEND` API not allowed.
     /// - [`CapaError::NotFound`] — `cap` or `receiver` handle not found.
     /// - [`CapaError::ApiNotAllowed`] — receiver is sealed without `RECEIVE_AFTER_SEAL`.
+    /// - [`CapaError::InvalidValue`] — a channel or doorbell send has nonempty memory attributes.
     pub fn send(
         platform: &dyn Platform,
         caller: &CapabilityRef<Domain>,
@@ -370,6 +581,13 @@ impl Capability<Domain> {
         _gpa_hint: Option<u64>,
     ) -> Result<UpdateBatch> {
         crate::platform::execute(platform, false, || -> Result<((), UpdateBatch)> {
+            if caller.read().data.domain_capabilities.contains_key(&cap) {
+                if _gpa_hint.is_some() {
+                    return Err(CapaError::InvalidValue);
+                }
+                return Self::send_endpoint_inner(platform, caller, cap, receiver, attrs, false)
+                    .map(|batch| ((), batch));
+            }
             // Pre-flight: fast-fail frozen check, resolve caller_id, receiver Arc, and META
             // constraints — all under a single caller.read() to minimise lock round-trips.
             // These checks are non-authoritative; the write-lock commit below is authoritative.
@@ -395,6 +613,9 @@ impl Capability<Domain> {
                 drop(r);
 
                 let resolved = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
+                if resolved.read().is_doorbell() {
+                    return Err(CapaError::PermissionDenied);
+                }
                 // One resolved.read(): channel follow + sealed check.
                 let (resolved_ref, recv_sealed_val) = {
                     let r = resolved.read();
@@ -643,6 +864,12 @@ impl Capability<Domain> {
             c.owned.owner = receiver_id;
             c.owned.attributes = attrs;
             c.owned.owner_domain = Some(Arc::downgrade(receiver_ref));
+            if attrs.comm() {
+                c.data.comm_binding = Some(CommBinding {
+                    target_domain_id: receiver_id,
+                    vp_id: u32::MAX,
+                });
+            }
             (start, size)
         };
 
@@ -738,6 +965,12 @@ impl Capability<Domain> {
         _gpa_override: Option<u64>,
     ) -> Result<(LocalHandle, UpdateBatch)> {
         crate::platform::execute(platform, false, || {
+            if receiver.read().data.pending_domain_capabilities.contains_key(&pending_id) {
+                if _gpa_override.is_some() {
+                    return Err(CapaError::InvalidValue);
+                }
+                return Self::accept_endpoint_inner(receiver, pending_id);
+            }
             // Stale-caller guard: `receiver` was cloned from PlatformCore::domain_cap
             // (in capavisor) BEFORE we entered execute(), so a concurrent revoke
             // may have completed since.  `accept_at` has no `require_api` call on
@@ -919,6 +1152,10 @@ impl Capability<Domain> {
         pending_id: u64,
     ) -> Result<UpdateBatch> {
         let ((), batch) = crate::platform::execute(platform, false, || {
+            if receiver.read().data.pending_domain_capabilities.contains_key(&pending_id) {
+                return Self::reject_endpoint_inner(receiver, pending_id)
+                    .map(|batch| ((), batch));
+            }
             // Stale-caller guard: `receiver` was cloned from PlatformCore::domain_cap
             // (in capavisor) BEFORE we entered execute(), so a concurrent revoke
             // may have completed since.  All other migrated ops go through
@@ -1105,6 +1342,7 @@ impl Capability<Domain> {
     ///
     /// # Errors
     /// - [`CapaError::NotFound`] — handle not found.
+    /// - [`CapaError::InvalidValue`] — attributes are not [`Attributes::NONE`].
     /// - [`CapaError::PermissionDenied`] — capability is not a channel, handle is
     ///   frozen, caller does not own the channel, or sealed receiver lacks
     ///   `RECEIVE_AFTER_SEAL`.
@@ -1116,137 +1354,117 @@ impl Capability<Domain> {
         attrs: Attributes,
     ) -> Result<UpdateBatch> {
         crate::platform::execute(platform, false, || {
-            // Resolve chan/receiver Arcs and the receiver-sealed predicate under a
-            // single short caller.read() — these reads are non-authoritative; the
-            // authoritative checks happen under caller.write() below.
-            let caller_id;
-            let chan_ref: CapabilityRef<Domain>;
-            let receiver_ref: CapabilityRef<Domain>;
-            let receiver_id;
-            let recv_sealed;
-            {
-                let r = caller.read();
-                caller_id = r.data.id;
-                let chan_weak = r
-                    .data
-                    .get_domain_capability(chan_handle)
-                    .ok_or(CapaError::NotFound)?
-                    .clone();
-                let recv_weak = r
-                    .data
-                    .get_domain_capability(receiver_handle)
-                    .ok_or(CapaError::NotFound)?
-                    .clone();
-                drop(r);
-                chan_ref = chan_weak.upgrade().ok_or(CapaError::NotFound)?;
-                receiver_ref = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
-                let rr = receiver_ref.read();
-                receiver_id = rr.data.id;
-                recv_sealed = rr.data.is_sealed();
-            }
+            Self::send_endpoint_inner(platform, caller, chan_handle, receiver_handle, attrs, true)
+                .map(|batch| ((), batch))
+        }).map(|((), batch)| batch)
+    }
 
-            // Only channels may be transferred — checked under chan.read().
-            if !chan_ref.read().is_channel() {
+    fn send_endpoint_inner(
+        _platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        chan_handle: LocalHandle,
+        receiver_handle: LocalHandle,
+        attrs: Attributes,
+        channel_only: bool,
+    ) -> Result<UpdateBatch> {
+        if attrs != Attributes::NONE {
+            return Err(CapaError::InvalidValue);
+        }
+        let chan_ref = Self::resolve_endpoint(caller, chan_handle)?;
+        // Resolve operands for ordered locking, then revalidate their table
+        // entries under the commit locks. Endpoint metadata is locked last.
+        let caller_id;
+        let receiver_cap: CapabilityRef<Domain>;
+        let receiver_ref: CapabilityRef<Domain>;
+        let receiver_id;
+        {
+            let r = caller.read();
+            caller_id = r.data.id;
+            let recv_weak = r
+                .data
+                .get_domain_capability(receiver_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            drop(r);
+            receiver_cap = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
+            receiver_ref = {
+                let r = receiver_cap.read();
+                if r.is_channel() {
+                    r.channel_target
+                        .as_ref()
+                        .and_then(|weak| weak.upgrade())
+                        .ok_or(CapaError::NotFound)?
+                } else {
+                    receiver_cap.clone()
+                }
+            };
+            let rr = receiver_ref.read();
+            receiver_id = rr.data.id;
+        }
+        if Arc::ptr_eq(caller, &receiver_ref) || receiver_ref.read().is_endpoint() {
+            return Err(CapaError::PermissionDenied);
+        }
+
+        lock_two_domains_ordered! {
+            let (caller_w, recv_w) =
+                (caller, caller_id, &receiver_ref, receiver_id);
+        }
+
+        caller_w.data.require_api(MonitorAPI::SEND)?;
+        if caller_w.data.is_domain_handle_frozen(chan_handle) {
+            return Err(CapaError::PermissionDenied);
+        }
+        let current = caller_w
+            .data
+            .get_domain_capability(chan_handle)
+            .and_then(|weak| weak.upgrade())
+            .ok_or(CapaError::NotFound)?;
+        if !Arc::ptr_eq(&current, &chan_ref) {
+            return Err(CapaError::PermissionDenied);
+        }
+        let current_receiver = caller_w
+            .data
+            .get_domain_capability(receiver_handle)
+            .and_then(|weak| weak.upgrade())
+            .ok_or(CapaError::NotFound)?;
+        if !Arc::ptr_eq(&current_receiver, &receiver_cap) {
+            return Err(CapaError::PermissionDenied);
+        }
+        if recv_w.data.is_revoked() {
+            return Err(CapaError::DomainRevoked);
+        }
+        let mut endpoint = chan_ref.write();
+        if endpoint.owned.owner != caller_id || (channel_only && !endpoint.is_channel()) {
+            return Err(CapaError::PermissionDenied);
+        }
+
+        if recv_w.data.is_sealed() {
+            if !recv_w.data.policy.receive_after_seal() {
                 return Err(CapaError::PermissionDenied);
             }
+            caller_w.data.freeze_domain_handle(chan_handle);
+            endpoint.owned.pending_receiver = Some(Arc::downgrade(&receiver_ref));
+            let pending = PendingDomainCapability {
+                cap: Arc::downgrade(&chan_ref),
+                sender_domain_id: caller_id,
+                sender_handle: chan_handle,
+                sender_domain: Arc::downgrade(caller),
+            };
+            recv_w.data.add_pending_domain_capability(pending);
+        } else {
+            caller_w
+                .data
+                .remove_domain_capability(chan_handle)
+                .ok_or(CapaError::NotFound)?;
+            let new_handle = recv_w.data.allocate_domain_handle();
+            recv_w
+                .data
+                .add_domain_capability(new_handle, Arc::downgrade(&chan_ref));
+            endpoint.owned.owner = receiver_id;
+            endpoint.owned.owner_domain = Some(Arc::downgrade(&receiver_ref));
+        }
 
-            if recv_sealed {
-                // ── Sealed receiver: freeze + enqueue pending ─────────────────
-                //
-                // Lock-order rule for channels: `chan.write` is never held while
-                // any of `caller/recv/sender.write` is held.  This rule is required
-                // by `revoke_domain_subtree`'s channel branch which holds `chan.write`
-                // and then takes `(recv, sender)` ordered via the macro — if any
-                // path took `chan.write` *while holding* `recv` or `sender`, we'd
-                // have a classic ABBA.
-                //
-                // Consequence: chan mutations happen in a separate phase from the
-                // two-domain table mutation.  A brief mid-state where the chan
-                // attributes haven't been updated yet is acceptable — the only
-                // observers are other send/accept_channel calls, which read the
-                // chan independently.
-                lock_two_domains_ordered! {
-                    let (caller_w, recv_w) =
-                        (caller, caller_id, &receiver_ref, receiver_id);
-                }
-
-                // Authoritative checks under caller.write().
-                caller_w.data.require_api(MonitorAPI::SEND)?;
-                if caller_w.data.is_domain_handle_frozen(chan_handle) {
-                    return Err(CapaError::PermissionDenied);
-                }
-                // Receiver is an operand domain, not the caller — reject if a
-                // stale Weak ref resolved to an already-revoked receiver (see
-                // `p8-check-operand-domains-not-revoked`).
-                if recv_w.data.is_revoked() {
-                    return Err(CapaError::DomainRevoked);
-                }
-                if !recv_w.data.policy.receive_after_seal() {
-                    return Err(CapaError::PermissionDenied);
-                }
-                caller_w.data.freeze_domain_handle(chan_handle);
-
-                // Pending insertion stays inside the atomic block so the freeze +
-                // pending-insert pair is observed together (matters for accept/reject
-                // races, which take recv.write to find pending entries).
-                let pending = PendingDomainCapability {
-                    cap: Arc::downgrade(&chan_ref),
-                    sender_domain_id: caller_id,
-                    sender_handle: chan_handle,
-                    sender_domain: Arc::downgrade(caller),
-                };
-                recv_w.data.add_pending_domain_capability(pending);
-                drop(caller_w);
-                drop(recv_w);
-
-                // Chan mutation in isolation (lock-order rule above).
-                {
-                    let mut cw = chan_ref.write();
-                    cw.owned.attributes = attrs;
-                    cw.owned.pending_receiver = Some(Arc::downgrade(&receiver_ref));
-                }
-            } else {
-                // ── Unsealed receiver: immediate ownership transfer ────────────
-                //
-                // Two-domain atomic block covers the table mutation only.  The chan
-                // owner-update happens in a separate phase to honour the lock-order
-                // rule (see sealed branch above).
-                lock_two_domains_ordered! {
-                    let (caller_w, recv_w) =
-                        (caller, caller_id, &receiver_ref, receiver_id);
-                }
-
-                caller_w.data.require_api(MonitorAPI::SEND)?;
-                if caller_w.data.is_domain_handle_frozen(chan_handle) {
-                    return Err(CapaError::PermissionDenied);
-                }
-                // Receiver is an operand domain — same rationale as the sealed
-                // branch above.
-                if recv_w.data.is_revoked() {
-                    return Err(CapaError::DomainRevoked);
-                }
-
-                caller_w.data.remove_domain_capability(chan_handle);
-                let new_handle = recv_w.data.allocate_domain_handle();
-                recv_w
-                    .data
-                    .add_domain_capability(new_handle, Arc::downgrade(&chan_ref));
-                let _ = new_handle;
-                drop(caller_w);
-                drop(recv_w);
-
-                // Chan owner mutation in isolation.
-                {
-                    let mut cw = chan_ref.write();
-                    cw.owned.owner = receiver_id;
-                    cw.owned.owner_domain = Some(Arc::downgrade(&receiver_ref));
-                    cw.owned.attributes = attrs;
-                }
-            }
-
-            Ok(((), UpdateBatch::new()))
-        })
-        .map(|((), b)| b)
+        Ok(UpdateBatch::new())
     }
 
     /// Accept a pending channel capability.
@@ -1265,88 +1483,86 @@ impl Capability<Domain> {
         pending_id: u64,
     ) -> Result<(LocalHandle, UpdateBatch)> {
         crate::platform::execute(platform, false, || {
-            // Stale-caller guard: `receiver` was cloned from PlatformCore::domain_cap
-            // (in capavisor) BEFORE we entered execute(), so a concurrent revoke
-            // may have completed since.  `accept_channel` has no `require_api`
-            // call on the receiver (only the sender is checked below), so it
-            // needs its own guard — mirrors `reject()`'s existing pattern.
-            if receiver.read().data.is_revoked() {
-                return Err(CapaError::DomainRevoked);
-            }
-
-            let receiver_id = receiver.read().data.id;
-
-            // Peek at the pending entry to learn sender's DomainId for ordered locking.
-            // The actual commit (remove_from_pending) happens under both write locks below.
-            let (sender_id_peek, sender_domain_weak) = {
-                let r = receiver.read();
-                let pending = r
-                    .data
-                    .pending_domain_capabilities
-                    .get(&pending_id)
-                    .ok_or(CapaError::NotFound)?;
-                (pending.sender_domain_id, pending.sender_domain.clone())
-            };
-            let sender_ref = sender_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-            // Acquire both domain write locks atomically (ABBA-safe by DomainId order)
-            // so the remove-from-sender + add-to-receiver pair is observed atomically.
-            // chan.write is taken AFTER releasing both — the lock-order rule for
-            // channels is "chan.write never held with recv/sender.write"; see
-            // send_channel for the rationale (deadlock avoidance with revoke).
-            let (chan_ref, sender_handle);
-            {
-                lock_two_domains_ordered! {
-                    let (recv_w, sender_w) =
-                        (receiver, receiver_id, &sender_ref, sender_id_peek);
-                }
-
-                // Atomically remove the pending entry (commit point).
-                let pending = recv_w
-                    .data
-                    .pending_domain_capabilities
-                    .remove(&pending_id)
-                    .ok_or(CapaError::NotFound)?;
-                chan_ref = pending.cap.upgrade().ok_or(CapaError::NotFound)?;
-                sender_handle = pending.sender_handle;
-
-                // Check sender domain not revoked — mirrors `accept_at`'s guard
-                // (domain_api.rs ~763): revocation cancels pending transfers, and
-                // `sender_ref` here is an operand domain resolved via a stale
-                // Weak ref, not the caller, so it needs its own explicit check.
-                if sender_w.data.is_revoked() {
-                    return Err(CapaError::PermissionDenied);
-                }
-
-                // Unfreeze sender's handle and remove it from sender's table.
-                sender_w.data.unfreeze_domain_handle(sender_handle);
-                sender_w.data.remove_domain_capability(sender_handle);
-
-                // Allocate handle in receiver's table (atomic with pending removal
-                // so concurrent readers never see the chan in neither table).
-                let new_handle = recv_w.data.allocate_domain_handle();
-                recv_w
-                    .data
-                    .add_domain_capability(new_handle, Arc::downgrade(&chan_ref));
-
-                // Capture new_handle for the function return value before guards drop.
-                let result_handle = new_handle;
-
-                // Drop both domain writes BEFORE taking chan.write (lock-order rule).
-                drop(recv_w);
-                drop(sender_w);
-
-                // Now safe to take chan.write standalone.
-                {
-                    let mut cw = chan_ref.write();
-                    cw.owned.owner = receiver_id;
-                    cw.owned.owner_domain = Some(Arc::downgrade(receiver));
-                    cw.owned.pending_receiver = None;
-                }
-
-                return Ok((result_handle, UpdateBatch::new()));
-            }
+            Self::accept_endpoint_inner(receiver, pending_id)
         })
+    }
+
+    fn accept_endpoint_inner(
+        receiver: &CapabilityRef<Domain>,
+        pending_id: u64,
+    ) -> Result<(LocalHandle, UpdateBatch)> {
+        // Stale-caller guard: `receiver` was cloned from PlatformCore::domain_cap
+        // (in capavisor) BEFORE we entered execute(), so a concurrent revoke
+        // may have completed since.  `accept_channel` has no `require_api`
+        // call on the receiver (only the sender is checked below), so it
+        // needs its own guard — mirrors `reject()`'s existing pattern.
+        if receiver.read().data.is_revoked() {
+            return Err(CapaError::DomainRevoked);
+        }
+
+        let receiver_id = receiver.read().data.id;
+
+        // Peek at the pending entry to learn sender's DomainId for ordered locking.
+        // The actual commit (remove_from_pending) happens under both write locks below.
+        let (sender_id_peek, sender_domain_weak) = {
+            let r = receiver.read();
+            let pending = r
+                .data
+                .pending_domain_capabilities
+                .get(&pending_id)
+                .ok_or(CapaError::NotFound)?;
+            (pending.sender_domain_id, pending.sender_domain.clone())
+        };
+        let sender_ref = sender_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        // Domain locks precede the endpoint lock, matching SEND and REJECT.
+        lock_two_domains_ordered! {
+            let (recv_w, sender_w) =
+                (receiver, receiver_id, &sender_ref, sender_id_peek);
+        }
+
+        let pending = recv_w
+            .data
+            .pending_domain_capabilities
+            .get(&pending_id)
+            .ok_or(CapaError::NotFound)?;
+        let chan_ref = pending.cap.upgrade().ok_or(CapaError::NotFound)?;
+        let sender_handle = pending.sender_handle;
+
+        // Check sender domain not revoked — mirrors `accept_at`'s guard
+        // (domain_api.rs ~763): revocation cancels pending transfers, and
+        // `sender_ref` here is an operand domain resolved via a stale
+        // Weak ref, not the caller, so it needs its own explicit check.
+        if sender_w.data.is_revoked() {
+            return Err(CapaError::PermissionDenied);
+        }
+        let held = sender_w
+            .data
+            .get_domain_capability(sender_handle)
+            .and_then(|weak| weak.upgrade())
+            .ok_or(CapaError::NotFound)?;
+        if !Arc::ptr_eq(&held, &chan_ref) || !sender_w.data.is_domain_handle_frozen(sender_handle) {
+            return Err(CapaError::PermissionDenied);
+        }
+        let mut endpoint = chan_ref.write();
+        if endpoint.owned.owner != sender_id_peek {
+            return Err(CapaError::PermissionDenied);
+        }
+        recv_w.data.pending_domain_capabilities.remove(&pending_id);
+        sender_w.data.unfreeze_domain_handle(sender_handle);
+        sender_w.data.remove_domain_capability(sender_handle);
+
+        // Allocate handle in receiver's table (atomic with pending removal
+        // so concurrent readers never see the chan in neither table).
+        let new_handle = recv_w.data.allocate_domain_handle();
+        recv_w
+            .data
+            .add_domain_capability(new_handle, Arc::downgrade(&chan_ref));
+
+        endpoint.owned.owner = receiver_id;
+        endpoint.owned.owner_domain = Some(Arc::downgrade(receiver));
+        endpoint.owned.pending_receiver = None;
+        Ok((new_handle, UpdateBatch::new()))
     }
 
     /// Reject a pending channel capability. Unfreezes the sender's handle.
@@ -1359,51 +1575,81 @@ impl Capability<Domain> {
         pending_id: u64,
     ) -> Result<UpdateBatch> {
         crate::platform::execute(platform, false, || {
-            // Stale-caller guard: `receiver` was cloned from PlatformCore::domain_cap
-            // (in capavisor) BEFORE we entered execute(), so a concurrent revoke
-            // may have completed since.  `reject_channel` has no `require_api`
-            // call at all, so it needs its own guard — mirrors `reject()`'s
-            // existing pattern.
-            if receiver.read().data.is_revoked() {
-                return Err(CapaError::DomainRevoked);
-            }
-
-            let pending = {
-                let mut rw = receiver.write();
-                rw.data
-                    .pending_domain_capabilities
-                    .remove(&pending_id)
-                    .ok_or(CapaError::NotFound)?
-            };
-
-            if let Some(sender_ref) = pending.sender_domain.upgrade() {
-                sender_ref
-                    .write()
-                    .data
-                    .unfreeze_domain_handle(pending.sender_handle);
-            }
-            // Clear in-transit marker on the channel cap.
-            if let Some(chan_ref) = pending.cap.upgrade() {
-                chan_ref.write().owned.pending_receiver = None;
-            }
-
-            Ok(((), UpdateBatch::new()))
-        })
-        .map(|((), b)| b)
+            Self::reject_endpoint_inner(receiver, pending_id).map(|batch| ((), batch))
+        }).map(|((), batch)| batch)
     }
 
-    /// Revoke a direct child of the memory region capability identified by `child_sub`.
-    ///
-    /// `region` is the LocalHandle of the parent memory region in `caller`'s table.
-    /// `child_sub` is the SubHandle returned by [`carve`] or [`alias`] when the
-    /// child was created.  Because SubHandles are auto-allocated from the region's
-    /// internal counter they are unique among siblings and stable across ownership
-    /// transfers — so this call succeeds even after the child has been sent to
-    /// another domain.
-    ///
-    /// # Errors
-    /// - [`CapaError::PermissionDenied`] — `region` handle is frozen, or `REVOKE` API not allowed.
-    /// - [`CapaError::NotFound`] — `region` handle or `child_sub` not found.
+    fn reject_endpoint_inner(
+        receiver: &CapabilityRef<Domain>,
+        pending_id: u64,
+    ) -> Result<UpdateBatch> {
+        // Stale-caller guard: `receiver` was cloned from PlatformCore::domain_cap
+        // (in capavisor) BEFORE we entered execute(), so a concurrent revoke
+        // may have completed since.  `reject_channel` has no `require_api`
+        // call at all, so it needs its own guard — mirrors `reject()`'s
+        // existing pattern.
+        if receiver.read().data.is_revoked() {
+            return Err(CapaError::DomainRevoked);
+        }
+
+        let (receiver_id, sender_id, sender_ref) = {
+            let r = receiver.read();
+            let pending = r
+                .data
+                .pending_domain_capabilities
+                .get(&pending_id)
+                .ok_or(CapaError::NotFound)?;
+            (
+                r.data.id,
+                pending.sender_domain_id,
+                pending.sender_domain.upgrade().ok_or(CapaError::NotFound)?,
+            )
+        };
+        lock_two_domains_ordered! {
+            let (recv_w, sender_w) = (receiver, receiver_id, &sender_ref, sender_id);
+        }
+        let pending = recv_w
+            .data
+            .pending_domain_capabilities
+            .get(&pending_id)
+            .ok_or(CapaError::NotFound)?;
+        let chan_ref = pending.cap.upgrade().ok_or(CapaError::NotFound)?;
+        let sender_handle = pending.sender_handle;
+        let held = sender_w
+            .data
+            .get_domain_capability(sender_handle)
+            .and_then(|weak| weak.upgrade())
+            .ok_or(CapaError::NotFound)?;
+        if !Arc::ptr_eq(&held, &chan_ref) || !sender_w.data.is_domain_handle_frozen(sender_handle) {
+            return Err(CapaError::PermissionDenied);
+        }
+        let mut endpoint = chan_ref.write();
+        recv_w.data.pending_domain_capabilities.remove(&pending_id);
+        sender_w.data.unfreeze_domain_handle(sender_handle);
+        endpoint.owned.pending_receiver = None;
+
+        Ok(UpdateBatch::new())
+    }
+
+    /// Return the first pending offer ID at or above `start`, independent of type.
+    pub fn enumerate_pending(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        start: u64,
+    ) -> Result<Option<u64>> {
+        crate::platform::execute(platform, false, || {
+            let c = caller.read();
+            c.data.require_api(MonitorAPI::ENUMERATE)?;
+            let next = c.data.pending_capabilities.keys()
+                .chain(c.data.pending_domain_capabilities.keys())
+                .copied().filter(|id| *id >= start).min();
+            Ok((next, UpdateBatch::new()))
+        }).map(|(next, _)| next)
+    }
+
+    /// Revoke a tree child by parent handle and stable child SubHandle.
+    /// The parent may be memory, an owned domain, or SELF_CAPABILITY.
+    /// Zero revokes an owned child domain directly, never a held endpoint.
     pub fn revoke(
         platform: &dyn Platform,
         caller: &CapabilityRef<Domain>,
@@ -1411,6 +1657,26 @@ impl Capability<Domain> {
         child_sub: SubHandle,
     ) -> Result<UpdateBatch> {
         crate::platform::execute(platform, true, || -> Result<((), UpdateBatch)> {
+            // Subhandles start at one. Zero preserves direct child-domain
+            // revocation through the same ownership entry point.
+            if child_sub == 0 {
+                caller.read().data.require_api(MonitorAPI::REVOKE)?;
+                let child = caller.read().data.get_domain_capability(region)
+                    .and_then(|weak| weak.upgrade()).ok_or(CapaError::NotFound)?;
+                if child.read().is_endpoint() {
+                    return Err(CapaError::ApiNotAllowed);
+                }
+                let sub = child.read().sub_handle;
+                let updates = Self::revoke_child_domain(platform, caller, sub)?;
+                caller.write().data.remove_domain_capability(region);
+                return Ok(((), updates));
+            }
+            if region == crate::SELF_CAPABILITY
+                || caller.read().data.domain_capabilities.contains_key(&region)
+            {
+                return Self::revoke_domain_child_inner(platform, caller, region, child_sub)
+                    .map(|batch| ((), batch));
+            }
             // Single-lock discipline: validate + mutate under caller.write().
             // Per the dom↔cap invariant, region looked up in caller's table is
             // owned by caller; the owner_domain indirection is redundant.
@@ -1487,7 +1753,7 @@ impl Capability<Domain> {
         caller: &CapabilityRef<Domain>,
         cap: LocalHandle,
     ) -> Result<UpdateBatch> {
-        crate::platform::execute(platform, false, || {
+        crate::platform::execute(platform, true, || {
             // Single-lock discipline: validate SEAL on the caller (the owner of
             // the child domain cap, by the dom↔cap invariant) and seal the child
             // under its own write lock.
@@ -1500,15 +1766,26 @@ impl Capability<Domain> {
                     .upgrade()
                     .ok_or(CapaError::NotFound)?
             };
-            if cap_ref.read().is_channel() {
+            if cap_ref.read().is_endpoint() {
                 return Err(CapaError::ApiNotAllowed);
             }
-            cap_ref.write().data.seal()?;
+            {
+                let mut w = cap_ref.write();
+                if w.data.status != DomainStatus::Unsealed {
+                    return Err(CapaError::DomainSealed);
+                }
+                for vp in &w.data.policy.vprocessor_states {
+                    platform.snapshot_comm_regs(w.data.id, vp.id as u32, RegBitmap::ALL)?;
+                }
+                w.data.seal()?;
+            }
+            let mut batch = UpdateBatch::new();
             {
                 let r = cap_ref.read();
                 platform.on_domain_sealed(r.data.id, &r.data.policy.interrupts, &r.data.policy.msrs);
+                add_interception_updates(&mut batch, r.data.id, &r.data.policy, PolicyScope::Domain);
             }
-            Ok(((), UpdateBatch::new()))
+            Ok(((), batch))
         })
         .map(|((), b)| b)
     }
@@ -1579,29 +1856,12 @@ impl Capability<Domain> {
         caller: &CapabilityRef<Domain>,
         child_handle: LocalHandle,
     ) -> Result<UpdateBatch> {
-        crate::platform::execute(platform, true, || -> Result<((), UpdateBatch)> {
-            // Look up child to get its actual sub_handle (independent of LocalHandle)
-            let child_weak = caller
-                .read()
-                .data
-                .get_domain_capability(child_handle)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
-            if child_ref.read().is_channel() {
-                return Err(CapaError::ApiNotAllowed);
-            }
-            let child_sub = child_ref.read().sub_handle;
-            let updates = Capability::revoke_child_domain(platform, caller, child_sub)?;
-            // Remove the now-revoked child from caller's domain table so the
-            // LocalHandle is reclaimed by allocate_domain_handle.
-            caller.write().data.remove_domain_capability(child_handle);
-            Ok(((), updates))
-        })
-        .map(|((), b)| b)
+        Self::revoke(platform, caller, child_handle, 0)
     }
 
     /// Register a COMM page owned by `caller`, bound to a child domain's VP.
+    /// `SELF_CAPABILITY` with `vp_id == u32::MAX` instead registers domain-level
+    /// communication memory, without consuming a VP's COMM binding.
     ///
     /// The capability at `handle` becomes a shared communication buffer that the
     /// monitor can read/write on behalf of the child's VP.  It must be a **carve**
@@ -1647,12 +1907,25 @@ impl Capability<Domain> {
                     .ok_or(CapaError::NotFound)?
                     .upgrade()
                     .ok_or(CapaError::NotFound)?;
-                child_ref = r
-                    .data
-                    .get_domain_capability(child_domain_handle)
-                    .ok_or(CapaError::NotFound)?
-                    .upgrade()
-                    .ok_or(CapaError::NotFound)?;
+                child_ref = if child_domain_handle == crate::SELF_CAPABILITY {
+                    if vp_id != u32::MAX {
+                        return Err(CapaError::InvalidOperation(
+                            "self COMM requires the domain-level VP sentinel".into(),
+                        ));
+                    }
+                    caller.clone()
+                } else {
+                    let child = r
+                        .data
+                        .get_domain_capability(child_domain_handle)
+                        .ok_or(CapaError::NotFound)?
+                        .upgrade()
+                        .ok_or(CapaError::NotFound)?;
+                    if child.read().is_channel() || child.read().is_doorbell() {
+                        return Err(CapaError::PermissionDenied);
+                    }
+                    child
+                };
             }
 
             let child_domain_id: DomainId;
@@ -1666,6 +1939,13 @@ impl Capability<Domain> {
                 }
                 if c.data.status != RegionStatus::Exclusive {
                     return Err(CapaError::PermissionDenied);
+                }
+                if child_domain_handle == crate::SELF_CAPABILITY
+                    && (c.data.access.start % 4096 != 0 || c.data.access.size == 0
+                        || c.data.access.size % 4096 != 0
+                        || !crate::Rights::RW.is_subset_of(&c.data.access.rights))
+                {
+                    return Err(CapaError::InvalidAccess);
                 }
                 if !c.children.is_empty() {
                     return Err(CapaError::PermissionDenied);
@@ -1691,7 +1971,8 @@ impl Capability<Domain> {
                     return Err(CapaError::DomainRevoked);
                 }
 
-                if vp_id as usize >= child_r.data.policy.num_vprocessors {
+                let domain_comm = child_domain_handle == crate::SELF_CAPABILITY;
+                if !domain_comm && vp_id as usize >= child_r.data.policy.num_vprocessors {
                     return Err(CapaError::InvalidOperation(
                         "vp_id exceeds child domain VP count".into(),
                     ));
@@ -1707,7 +1988,7 @@ impl Capability<Domain> {
                         })
                         .unwrap_or(false)
                 });
-                if already_bound {
+                if !domain_comm && already_bound {
                     return Err(CapaError::InvalidOperation(
                         "VP already has a COMM binding".into(),
                     ));
@@ -1739,6 +2020,42 @@ impl Capability<Domain> {
             Ok(((), batch))
         })
         .map(|((), b)| b)
+    }
+
+    /// Use self-registered domain communication memory while excluding revocation.
+    /// The callback receives only the validated physical range and its caller GPA.
+    pub fn with_domain_comm<T>(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        handle: LocalHandle,
+        f: impl FnOnce(Access, u64) -> Result<T>,
+    ) -> Result<T> {
+        crate::platform::execute(platform, false, || {
+            let (access, gpa) = {
+                let r = caller.read();
+                r.data.require_api(MonitorAPI::SET)?;
+                if r.data.is_memory_handle_frozen(handle) {
+                    return Err(CapaError::PermissionDenied);
+                }
+                let cap = r.data.get_memory_capability(handle)
+                    .and_then(|weak| weak.upgrade()).ok_or(CapaError::NotFound)?;
+                let c = cap.read();
+                if c.owned.owner != r.data.id
+                    || !c.owned.attributes.comm()
+                    || c.data.comm_binding != Some(CommBinding {
+                        target_domain_id: r.data.id, vp_id: u32::MAX,
+                    })
+                {
+                    return Err(CapaError::PermissionDenied);
+                }
+                #[cfg(feature = "address_translation")]
+                let gpa = *r.data.mapped_gpas.get(&handle).ok_or(CapaError::NotFound)?;
+                #[cfg(not(feature = "address_translation"))]
+                let gpa = c.data.access.start;
+                (c.data.access, gpa)
+            };
+            f(access, gpa).map(|result| (result, UpdateBatch::new()))
+        }).map(|(result, _)| result)
     }
 
     /// Add a virtual processor to a child domain.
@@ -1860,6 +2177,9 @@ impl Capability<Domain> {
 
             let mut batch = UpdateBatch::new();
             batch.add_comm_region(owner_id, child_domain_id, vp_id, comm_phys, comm_size);
+            add_interception_updates(
+                &mut batch, child_domain_id, &child_ref.read().data.policy, PolicyScope::Vp(u64::from(vp_id)),
+            );
             Ok((vp_id, batch))
         })
     }
@@ -1875,24 +2195,47 @@ impl Capability<Domain> {
     /// produce an inconsistent, non-atomic report.
     ///
     /// # Errors
+    /// - [`CapaError::DomainRevoked`] — caller has been revoked.
     /// - [`CapaError::DomainNotSealed`] — caller is not sealed.
     /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::ATTEST`.
     pub fn attest_self_structured(
         platform: &dyn Platform,
         caller: &CapabilityRef<Domain>,
     ) -> Result<(StructuredAttestation, UpdateBatch)> {
-        crate::platform::execute(platform, false, || {
-            {
-                let c = caller.read();
-                if !c.data.is_sealed() {
-                    return Err(CapaError::DomainNotSealed);
-                }
-                if !c.data.policy.api.attest() {
-                    return Err(CapaError::ApiNotAllowed);
-                }
-            }
-            Ok((attest::build_structured_attestation(caller), UpdateBatch::new()))
+        Self::with_self_attestation(platform, caller, true, |_, report| {
+            Ok((
+                report.expect("requested attestation snapshot"),
+                UpdateBatch::new(),
+            ))
         })
+    }
+
+    /// Validate self-attestation and deliver it while excluding revocation.
+    ///
+    /// When `generate_report` is false, only caller validation is performed;
+    /// no capability inventory is traversed. This supports cached-report
+    /// continuations without regenerating the report. The callback receives
+    /// the validated domain ID and, when requested, its structured snapshot.
+    ///
+    /// The shared operation lock remains held through `deliver`, which must
+    /// not re-enter mediated engine operations. Platform cache and transport
+    /// state must also be protected by the platform's own domain-state lock.
+    pub fn with_self_attestation<T>(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        generate_report: bool,
+        deliver: impl FnOnce(DomainId, Option<StructuredAttestation>) -> Result<T>,
+    ) -> Result<T> {
+        crate::platform::execute(platform, false, || {
+            let domain_id = {
+                let c = caller.read();
+                c.data.require_api(MonitorAPI::ATTEST)?;
+                c.data.id
+            };
+            let report = generate_report.then(|| attest::build_structured_attestation(caller));
+            deliver(domain_id, report).map(|result| (result, UpdateBatch::new()))
+        })
+        .map(|(result, _)| result)
     }
 
     /// Attest a domain (or its channel target) identified by `handle` in the caller's table,
@@ -2170,10 +2513,14 @@ impl Capability<Domain> {
         // UpdateBatch skips the cross-core IPI/barrier path and only takes
         // the shared cap lock — exactly the synchronisation we need.
         crate::platform::execute(platform, false, || {
+            apply_core_updates(platform, core_id)?;
             let ctx = if to_handle == 0 {
                 Self::switch_domain_return(caller, core_id, platform, None)?
             } else {
-                Self::switch_domain_forward(caller, to_handle, to_vp_id, core_id, platform)?
+                let ctx =
+                    Self::switch_domain_forward(caller, to_handle, to_vp_id, core_id, platform)?;
+                platform.handoff_vp(&ctx, VpHandoff::Call);
+                ctx
             };
             Ok((ctx, UpdateBatch::new()))
         })
@@ -2195,6 +2542,7 @@ impl Capability<Domain> {
         // See comment on `switch`: the empty-batch `execute` here serialises
         // the return-path `set_core_context` against destructive engine ops.
         crate::platform::execute(platform, false, || {
+            apply_core_updates(platform, core_id)?;
             let ctx = Self::switch_domain_return(caller, core_id, platform, Some(exit_reason))?;
             Ok((ctx, UpdateBatch::new()))
         })
@@ -2307,6 +2655,15 @@ impl Capability<Domain> {
         platform: &dyn Platform,
         exit_reason: Option<u32>,
     ) -> Result<SwitchContext> {
+        Ok(Self::prepare_domain_return(caller, core_id, platform, exit_reason)?.commit(platform))
+    }
+
+    pub(crate) fn prepare_domain_return(
+        caller: &CapabilityRef<Domain>,
+        core_id: CoreId,
+        platform: &dyn Platform,
+        exit_reason: Option<u32>,
+    ) -> Result<PreparedVpReturn> {
         let (caller_id, caller_vp_arc) = {
             let c = caller.read();
             if !c.data.is_sealed() {
@@ -2332,79 +2689,48 @@ impl Capability<Domain> {
         // until every fallible check below has passed, so an early `Err`
         // can't leave the stack popped without the state writes it implies.
         let core_ctx = platform.switch_manager().get_core(core_id)?;
+        require_core_binding(core_ctx, caller, caller_vp_id)?;
         let prev_ctx = core_ctx
             .top_frame()
             .ok_or_else(|| CapaError::InvalidOperation("no caller to return to".to_string()))?;
 
         let prev_domain_id = prev_ctx.domain_id;
         let prev_vp_id = prev_ctx.vp_id;
-        let prev_domain_ref = prev_ctx
-            .domain
-            .upgrade()
-            .ok_or(CapaError::PermissionDenied)?;
-
-        let prev_vp_arc = {
-            let pd = prev_domain_ref.read();
-            pd.data
-                .policy
-                .vprocessor_states
-                .get(prev_vp_id as usize)
-                .ok_or(CapaError::NotFound)?
-                .clone()
-        };
-
-        // Verify previous VP is Locked waiting for this callee.
-        match &*prev_vp_arc.run_state.read() {
-            VpRunState::Locked {
-                callee_domain_id,
-                callee_vp_id,
-                ..
-            } if *callee_domain_id == caller_id && *callee_vp_id == caller_vp_id => {}
-            _ => {
-                return Err(CapaError::InvalidOperation(
-                    "previous VP is not locked waiting for this callee".to_string(),
-                ))
-            }
+        let (prev_domain_ref, prev_vp_arc) =
+            resolve_locked_caller(&prev_ctx, (caller_id, caller_vp_id))?;
+        let mut callee = (prev_domain_id, prev_vp_id);
+        let mut depth = 1;
+        while let Some(frame) = core_ctx.peek_at(depth) {
+            resolve_locked_caller(&frame, callee)?;
+            callee = (frame.domain_id, frame.vp_id);
+            depth += 1;
         }
 
-        *prev_vp_arc.run_state.write() = VpRunState::Running { core: core_id };
-        *caller_vp_arc.run_state.write() = VpRunState::Available {
-            last_exit_reason: exit_reason,
-        };
-
-        // Drain any cross-core updates queued for this core (e.g. a
-        // `TlbShootdown` left behind while this core was idle/cache-only
-        // and not IPI'd) BEFORE rebinding to `prev_domain_ref` — otherwise
-        // this core could resume guest execution with stale cached
-        // entries for a domain another core has since torn down.
-        let _ = apply_core_updates(platform, core_id);
-
-        core_ctx.set_binding(prev_domain_ref.clone(), prev_vp_id);
-
-        // Now pop the frame we peeked above — every fallible check has
-        // passed, so this can't strand the stack out of sync.
-        match core_ctx.pop_frame() {
-            Some(frame) => debug_assert!(
-                frame.domain_id == prev_domain_id && frame.vp_id == prev_vp_id,
-                "call_stack top changed between peek and pop on return: expected domain {} vp {}, got domain {} vp {}",
-                prev_domain_id, prev_vp_id, frame.domain_id, frame.vp_id
-            ),
-            None => debug_assert!(
-                false,
-                "call_stack empty on return; expected frame for domain {} vp {}",
-                prev_domain_id, prev_vp_id
-            ),
-        }
-
-        Ok(SwitchContext {
+        let context = SwitchContext {
             from_domain: Some(caller.clone()),
-            to_domain: prev_domain_ref,
+            to_domain: prev_domain_ref.clone(),
             core_id,
             is_return: true,
             from_vp_id: Some(caller_vp_id),
             to_vp_id: Some(prev_vp_id),
             interrupt_return: None,
             interrupt_inject: None,
+        };
+        let read_set = write_set(
+            &caller.read().data,
+            caller_vp_id,
+            &VpRunState::Available {
+                last_exit_reason: exit_reason,
+            },
+            true,
+        );
+        Ok(PreparedVpReturn {
+            context,
+            core: core_ctx.clone(),
+            source: caller_vp_arc,
+            target: prev_vp_arc,
+            exit_reason,
+            read_set,
         })
     }
 
@@ -2465,7 +2791,7 @@ impl Capability<Domain> {
         // Channel check runs before VP lookup to preserve early-reject ordering.
         let (to_domain_id, core_allowed, to_vp_arc) = {
             let td = to_domain_ref.read();
-            if td.is_channel() {
+            if td.is_endpoint() {
                 return Err(CapaError::ApiNotAllowed);
             }
             if !td.data.is_sealed() {
@@ -2494,6 +2820,7 @@ impl Capability<Domain> {
             })?
         };
         let caller_vp_id = caller_vp_arc.id;
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
 
         // Confirm the caller is Running before mutating anything.
         if !matches!(&*caller_vp_arc.run_state.read(), VpRunState::Running { .. }) {
@@ -2543,6 +2870,7 @@ impl Capability<Domain> {
                 // to a domain the caller didn't actually land on.
                 let write_set = write_set(
                     &to_domain_ref.read().data,
+                    to_vp_id,
                     &VpRunState::Available { last_exit_reason },
                     false,
                 );
@@ -2691,11 +3019,6 @@ impl Capability<Domain> {
             callee_vp_id: to_vp_id,
         };
 
-        // Drain any cross-core updates queued for this core before rebinding
-        // to `actual_cap` — see the matching comment in `switch_domain_return`.
-        let _ = apply_core_updates(platform, core_id);
-
-        let core_ctx = platform.switch_manager().get_core(core_id)?;
         core_ctx.set_binding(actual_cap.clone(), actual_vp.id);
 
         // Mirror this switch onto the current core's per-core call stack
@@ -2757,14 +3080,32 @@ impl Capability<Domain> {
         vector: u8,
     ) -> Result<(VpInterruptContext, UpdateBatch)> {
         crate::platform::execute(platform, false, || {
-            // Find the Deliver-policy ancestor via the same CDT walk used by
-            // `SwitchManager::route_interrupt` (see `find_interrupt_handler`).
-            // The loop below independently walks the *live* VP call chain and
-            // cross-checks it lands on this same domain — see that loop's
-            // comment for why the two must agree.
-            let (handler_domain_id, _reported_to) =
-                crate::switch::find_interrupt_handler(vector, interrupted_cap)?;
+            let context = Self::prepare_vp_interrupt(
+                platform, interrupted_cap, core_id, vector, None,
+            )?.commit(platform);
+            Ok((VpInterruptContext {
+                interrupted_domain: interrupted_cap.clone(),
+                interrupted_vp_id: context.from_vp_id.expect("validated interrupt source"),
+                handler_domain: context.to_domain,
+                handler_vp_id: context.to_vp_id.expect("validated interrupt target"),
+                core_id,
+            }, UpdateBatch::new()))
+        })
+    }
 
+    pub(crate) fn prepare_vp_interrupt(
+        platform: &dyn Platform,
+        interrupted_cap: &CapabilityRef<Domain>,
+        core_id: CoreId,
+        vector: u8,
+        recipient: Option<DomainId>,
+    ) -> Result<PreparedVpInterrupt> {
+            if platform.get_current_core() != Some(core_id) {
+                return Err(CapaError::InvalidOperation(
+                    "interrupt handoff must run on its owning core".to_string(),
+                ));
+            }
+            apply_core_updates(platform, core_id)?;
             let (interrupted_domain_id, leaf_vp_arc) = {
                 let d = interrupted_cap.read();
                 let id = d.data.id;
@@ -2776,19 +3117,29 @@ impl Capability<Domain> {
                 (id, vp)
             };
             let leaf_vp_id = leaf_vp_arc.id;
+            let core_ctx = platform.switch_manager().get_core(core_id)?;
+            require_core_binding(core_ctx, interrupted_cap, leaf_vp_id)?;
 
             // Short-circuit: handler is the interrupted domain itself.
-            if interrupted_domain_id == handler_domain_id {
-                return Ok((
-                    VpInterruptContext {
-                        interrupted_domain: interrupted_cap.clone(),
-                        interrupted_vp_id: leaf_vp_id,
-                        handler_domain: interrupted_cap.clone(),
-                        handler_vp_id: leaf_vp_id,
+            if recipient.is_none() && interrupted_cap.read().data.policy.interrupts_for(leaf_vp_id)
+                .get_policy(vector).visibility == InterruptVisibility::Deliver
+            {
+                return Ok(PreparedVpInterrupt {
+                    context: SwitchContext {
+                        from_domain: Some(interrupted_cap.clone()),
+                        from_vp_id: Some(leaf_vp_id),
+                        to_domain: interrupted_cap.clone(),
+                        to_vp_id: Some(leaf_vp_id),
                         core_id,
+                        is_return: true,
+                        interrupt_return: None,
+                        interrupt_inject: None,
                     },
-                    UpdateBatch::new(),
-                ));
+                    core: core_ctx.clone(),
+                    chain: vec![(interrupted_cap.clone(), interrupted_domain_id, leaf_vp_arc)],
+                    vector,
+                    read_set: RegBitmap::NONE,
+                });
             }
 
             // Build call chain: chain[0] = leaf (Running), chain[n-1] = handler (Locked).
@@ -2811,10 +3162,8 @@ impl Capability<Domain> {
             // Walk the rest of the chain directly off this core's call_stack —
             // depth 0 is the leaf's caller, depth 1 that VP's own caller, and so
             // on — instead of following VpRunState links (Running/Locked no
-            // longer carry them). Each entry's actual Locked state is verified
-            // where it's consumed below (the Waiting-rewrite loop and the
-            // handler section), so it isn't re-checked here.
-            let core_ctx = platform.switch_manager().get_core(core_id)?;
+            // longer carry them). Validate every Locked edge before changing
+            // any state or touching hardware.
             let mut depth = 0;
             loop {
                 let ctx = core_ctx.peek_at(depth).ok_or_else(|| {
@@ -2823,161 +3172,39 @@ impl Capability<Domain> {
                     )
                 })?;
 
-                let domain_cap = ctx.domain.upgrade().ok_or_else(|| {
-                    CapaError::InvalidOperation(
-                        "domain capability dropped during interrupt chain walk".to_string(),
-                    )
-                })?;
+                let callee = chain.last().expect("interrupt chain includes its leaf");
+                let (domain_cap, vp_arc) =
+                    resolve_locked_caller(&ctx, (callee.1, callee.2.id))?;
                 let domain_id = ctx.domain_id;
 
-                let vp_arc: VProcessorRef = {
-                    let d = domain_cap.read();
-                    d.data
-                        .policy
-                        .vprocessor_states
-                        .get(ctx.vp_id as usize)
-                        .ok_or(CapaError::NotFound)?
-                        .clone()
+                let handles = match recipient {
+                    Some(target) => domain_id == target,
+                    None => domain_cap.read().data.policy.interrupts_for(vp_arc.id)
+                        .get_policy(vector).visibility == InterruptVisibility::Deliver,
                 };
-
                 chain.push((domain_cap, domain_id, vp_arc));
 
-                if domain_id == handler_domain_id {
+                if handles {
                     break;
                 }
                 depth += 1;
             }
 
-            // Verify handler was reached.
-            let last_domain_id = chain.last().unwrap().1;
-            if last_domain_id != handler_domain_id {
-                return Err(CapaError::InvalidOperation(
-                    "interrupt handler domain not found in VP call chain".to_string(),
-                ));
-            }
-
             let n = chain.len();
             let handler_vp_id = chain[n - 1].2.id;
-
-            // Apply state changes (all VP locks are independent — no deadlock risk).
-            //
-            // chain[0]:      Running → Waiting { unlocks: None }      (true leaf)
-            // chain[1..n-2]: Locked  → Waiting { unlocks: Some(chain[i-1]) }
-            // chain[n-1]:    Locked  → Running { core }
-            //
-            // blocked: chain[n-2] (directly called by the handler) is set to
-            // false immediately, since the handler is already Running. Every
-            // other Waiting frame (chain[0..n-2]) starts blocked: true, and
-            // is only cleared later, one hop at a time, as
-            // `switch_domain_forward` actually resumes the frame above it.
-
-            if !matches!(&*chain[0].2.run_state.read(), VpRunState::Running { .. }) {
-                return Err(CapaError::InvalidOperation(
-                    "leaf VP changed state during interrupt delivery".to_string(),
-                ));
-            }
-            let leaf_report = chain[0]
-                .0
-                .read()
-                .data
-                .policy
-                .interrupts
-                .get_policy(vector)
-                .visibility
-                == InterruptVisibility::Report;
-            *chain[0].2.run_state.write() = VpRunState::Waiting {
-                unlocks: None,
-                vector,
-                report: leaf_report,
-                blocked: 0 != n - 2,
+            let context = SwitchContext {
+                from_domain: Some(interrupted_cap.clone()),
+                to_domain: chain[n - 1].0.clone(),
+                core_id,
+                is_return: true,
+                from_vp_id: Some(leaf_vp_id),
+                to_vp_id: Some(handler_vp_id),
+                interrupt_return: None,
+                interrupt_inject: None,
             };
-
-            // Intermediate VPs: Locked → Waiting { unlocks: Some(callee) }.
-            for i in 1..n - 1 {
-                let callee_domain = Arc::downgrade(&chain[i - 1].0);
-                let callee_domain_id = chain[i - 1].1;
-                let callee_vp_id = chain[i - 1].2.id;
-                if !matches!(&*chain[i].2.run_state.read(), VpRunState::Locked { .. }) {
-                    return Err(CapaError::InvalidOperation(
-                        "intermediate VP changed state during interrupt delivery".to_string(),
-                    ));
-                }
-                let report = chain[i]
-                    .0
-                    .read()
-                    .data
-                    .policy
-                    .interrupts
-                    .get_policy(vector)
-                    .visibility
-                    == InterruptVisibility::Report;
-                *chain[i].2.run_state.write() = VpRunState::Waiting {
-                    unlocks: Some(VpCallContext {
-                        domain: callee_domain,
-                        domain_id: callee_domain_id,
-                        vp_id: callee_vp_id,
-                    }),
-                    vector,
-                    report,
-                    blocked: i != n - 2,
-                };
-            }
-
-            // Handler: Locked → Running.
-            if !matches!(&*chain[n - 1].2.run_state.read(), VpRunState::Locked { .. }) {
-                return Err(CapaError::InvalidOperation(
-                    "handler VP not in Locked state".to_string(),
-                ));
-            }
-            *chain[n - 1].2.run_state.write() = VpRunState::Running { core: core_id };
-
-            // Drain any cross-core updates queued for this core before rebinding
-            // to the handler domain — see the matching comment in
-            // `switch_domain_return`.
-            let _ = apply_core_updates(platform, core_id);
-
-            // Update platform core tracking.
-            core_ctx.set_binding(chain[n - 1].0.clone(), handler_vp_id);
-
-            // Pop the `n-1` frames this call chain consumed from the per-core
-            // stack — the handler becomes the new leaf on this core. The frozen
-            // segment (chain[0..n-1]) is NOT lost: it lives on in each VP's own
-            // Waiting state (unlocks field), ready to
-            // be re-pushed onto whichever core later resumes it (see
-            // `switch_domain_forward`'s resume branch) — possibly a different
-            // core than this one, which is exactly why this data can't live in
-            // any per-core stack while dormant. This runs last, after every
-            // `VpRunState` write above has committed, so an early `Err` return
-            // anywhere above never leaves the stack popped without a matching
-            // state transition.
-            for entry in chain.iter().skip(1) {
-                let expected_domain_id = entry.1;
-                let expected_vp_id = entry.2.id;
-                match core_ctx.pop_frame() {
-                Some(frame) => debug_assert!(
-                    frame.domain_id == expected_domain_id && frame.vp_id == expected_vp_id,
-                    "call_stack frame diverged during interrupt delivery: expected domain {} vp {}, got domain {} vp {}",
-                    expected_domain_id, expected_vp_id, frame.domain_id, frame.vp_id
-                ),
-                None => debug_assert!(
-                    false,
-                    "call_stack empty during interrupt delivery; expected frame for domain {} vp {}",
-                    expected_domain_id, expected_vp_id
-                ),
-            }
-            }
-
-            Ok((
-                VpInterruptContext {
-                    interrupted_domain: interrupted_cap.clone(),
-                    interrupted_vp_id: leaf_vp_id,
-                    handler_domain: chain[n - 1].0.clone(),
-                    handler_vp_id,
-                    core_id,
-                },
-                UpdateBatch::new(),
-            ))
-        })
+            let read_set = interrupted_cap.read().data.policy.interrupts_for(leaf_vp_id)
+                .get_policy(vector).read_set;
+            Ok(PreparedVpInterrupt { context, core: core_ctx.clone(), chain, vector, read_set })
     }
 
     // =========================================================================
@@ -3009,11 +3236,32 @@ impl Capability<Domain> {
         id: PolicyIdentifier,
         value: u64,
     ) -> Result<UpdateBatch> {
-        crate::platform::execute(platform, false, || -> Result<((), UpdateBatch)> {
+        Self::set_policy_scoped(
+            platform,
+            caller,
+            child_handle,
+            PolicyScope::Domain,
+            id,
+            value,
+        )
+    }
+
+    pub fn set_policy_scoped(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        scope: PolicyScope,
+        id: PolicyIdentifier,
+        value: u64,
+    ) -> Result<UpdateBatch> {
+        // Keep configuration publication and its hardware projection ordered
+        // against seal, switch, and other configuration operations.
+        crate::platform::execute(platform, true, || -> Result<((), UpdateBatch)> {
             use crate::update::PolicyChange;
 
             // Validate caller has SET permission.
             caller.read().data.require_api(MonitorAPI::SET)?;
+            id.validate()?;
 
             // Retrieve child.
             let child_weak = caller
@@ -3027,6 +3275,9 @@ impl Capability<Domain> {
             let parent_policy = caller.read().data.policy.clone();
             let mut child_w = child_ref.write();
 
+            if child_w.is_endpoint() {
+                return Err(CapaError::PermissionDenied);
+            }
             // Sealed check must be done while holding the write lock to prevent a
             // concurrent seal from racing between the check and the mutation.
             if child_w.data.status != crate::domain::DomainStatus::Unsealed {
@@ -3035,6 +3286,16 @@ impl Capability<Domain> {
 
             let child_id = child_w.data.id;
             let mut batch = UpdateBatch::new();
+            let mut policy = match scope {
+                PolicyScope::Domain => child_w.data.policy.clone(),
+                PolicyScope::Vp(vp) => {
+                    if id.execution_kind().is_none() {
+                        return Err(CapaError::InvalidValue);
+                    }
+                    require_vp(&child_w.data.policy, vp)?;
+                    child_w.data.policy.resolve_vp_policy(vp)
+                }
+            };
 
             match id {
                 PolicyIdentifier::Cores => {
@@ -3042,20 +3303,23 @@ impl Capability<Domain> {
                     if (value & !parent_policy.cores) != 0 {
                         return Err(CapaError::MonotonicityViolation);
                     }
-                    child_w.data.policy.cores = value;
+                    policy.cores = value;
                     // Maintain invariant: num_vprocessors ≤ popcount(cores).
                     let max_vps = value.count_ones() as usize;
-                    if child_w.data.policy.num_vprocessors > max_vps {
-                        child_w.data.policy.num_vprocessors = max_vps;
+                    if policy.num_vprocessors > max_vps {
+                        policy.num_vprocessors = max_vps;
                     }
                     batch.add_policy_changed(child_id, PolicyChange::Cores(value));
                 }
                 PolicyIdentifier::ApiMonitor => {
-                    let bits = value as u16;
+                    let bits = u16::try_from(value).map_err(|_| CapaError::InvalidValue)?;
+                    if bits & !MonitorAPI::ALL.bits() != 0 {
+                        return Err(CapaError::InvalidValue);
+                    }
                     if (bits & !parent_policy.api.bits()) != 0 {
                         return Err(CapaError::MonotonicityViolation);
                     }
-                    child_w.data.policy.api = MonitorAPI::from_bits(bits);
+                    policy.api = MonitorAPI::from_bits(bits);
                     batch.add_policy_changed(child_id, PolicyChange::ApiMonitor(bits));
                 }
                 PolicyIdentifier::DefaultInterruptVisibility => {
@@ -3067,11 +3331,24 @@ impl Capability<Domain> {
                     {
                         return Err(CapaError::MonotonicityViolation);
                     }
-                    child_w.data.policy.interrupts.default.visibility = vis;
+                    policy.interrupts.default.visibility = vis;
                     batch.add_policy_changed(
                         child_id,
                         PolicyChange::InterruptDefaultVisibility(vis),
                     );
+                }
+                PolicyIdentifier::DefaultInterruptRegReadSet(word) => {
+                    policy.interrupts.default.read_set.set_word(word as usize, value);
+                    batch.add_policy_changed(child_id, PolicyChange::DefaultInterruptRegReadSet { word, bits: value });
+                }
+                PolicyIdentifier::DefaultInterruptRegWriteSet(word) => {
+                    policy.interrupts.default.write_set.set_word(word as usize, value);
+                    batch.add_policy_changed(child_id, PolicyChange::DefaultInterruptRegWriteSet { word, bits: value });
+                }
+                PolicyIdentifier::DefaultVectorInjectable => {
+                    let injectable = bool_from_u64(value)?;
+                    policy.interrupts.default.injectable = injectable;
+                    batch.add_policy_changed(child_id, PolicyChange::DefaultVectorInjectable(injectable));
                 }
                 PolicyIdentifier::VectorVisibility(vec) => {
                     let vis = visibility_from_u64(value)?;
@@ -3081,13 +3358,11 @@ impl Capability<Domain> {
                     if visibility_to_u64(vis) < visibility_to_u64(parent_effective) {
                         return Err(CapaError::MonotonicityViolation);
                     }
-                    let default_vis = child_w.data.policy.interrupts.default.visibility;
-                    let default_read = child_w.data.policy.interrupts.default.read_set;
-                    let default_write = child_w.data.policy.interrupts.default.write_set;
-                    let default_injectable = child_w.data.policy.interrupts.default.injectable;
-                    let entry = child_w
-                        .data
-                        .policy
+                    let default_vis = policy.interrupts.default.visibility;
+                    let default_read = policy.interrupts.default.read_set;
+                    let default_write = policy.interrupts.default.write_set;
+                    let default_injectable = policy.interrupts.default.injectable;
+                    let entry = policy
                         .interrupts
                         .overrides
                         .entry(vec)
@@ -3108,10 +3383,8 @@ impl Capability<Domain> {
                     );
                 }
                 PolicyIdentifier::VectorRegReadSet(vec, word) => {
-                    let default_policy = child_w.data.policy.interrupts.default.clone();
-                    let entry = child_w
-                        .data
-                        .policy
+                    let default_policy = policy.interrupts.default.clone();
+                    let entry = policy
                         .interrupts
                         .overrides
                         .entry(vec)
@@ -3127,10 +3400,8 @@ impl Capability<Domain> {
                     );
                 }
                 PolicyIdentifier::VectorRegWriteSet(vec, word) => {
-                    let default_policy = child_w.data.policy.interrupts.default.clone();
-                    let entry = child_w
-                        .data
-                        .policy
+                    let default_policy = policy.interrupts.default.clone();
+                    let entry = policy
                         .interrupts
                         .overrides
                         .entry(vec)
@@ -3150,11 +3421,9 @@ impl Capability<Domain> {
                     // bitmaps: this only controls whether a parent may later
                     // call THEMIS_INJECT_INTERRUPT for this vector on this
                     // child, which is entirely the parent's own call to make.
-                    let injectable = value != 0;
-                    let default_policy = child_w.data.policy.interrupts.default.clone();
-                    let entry = child_w
-                        .data
-                        .policy
+                    let injectable = bool_from_u64(value)?;
+                    let default_policy = policy.interrupts.default.clone();
+                    let entry = policy
                         .interrupts
                         .overrides
                         .entry(vec)
@@ -3169,33 +3438,35 @@ impl Capability<Domain> {
                     );
                 }
                 PolicyIdentifier::DefaultExitTrap => {
-                    let trap = value != 0;
+                    let trap = bool_from_u64(value)?;
                     // Monotonicity: child cannot un-trap if parent traps by default.
                     if !trap && parent_policy.exits.default.trap {
                         return Err(CapaError::MonotonicityViolation);
                     }
-                    child_w.data.policy.exits.default.trap = trap;
+                    policy.exits.default.trap = trap;
                     batch.add_policy_changed(child_id, PolicyChange::DefaultExitTrap(trap));
                 }
+                PolicyIdentifier::DefaultExitRegReadSet(word) => {
+                    policy.exits.default.read_set.set_word(word as usize, value);
+                    batch.add_policy_changed(child_id, PolicyChange::DefaultExitRegReadSet { word, bits: value });
+                }
+                PolicyIdentifier::DefaultExitRegWriteSet(word) => {
+                    policy.exits.default.write_set.set_word(word as usize, value);
+                    batch.add_policy_changed(child_id, PolicyChange::DefaultExitRegWriteSet { word, bits: value });
+                }
                 PolicyIdentifier::ExitReasonTrap(reason) => {
-                    let trap = value != 0;
+                    let trap = bool_from_u64(value)?;
                     // Monotonicity: child cannot un-trap an exit that the parent traps.
                     let parent_effective = parent_policy.exits.get_action(reason);
                     if !trap && parent_effective.trap {
                         return Err(CapaError::MonotonicityViolation);
                     }
-                    let default_trap = child_w.data.policy.exits.default.trap;
-                    let entry = child_w
-                        .data
-                        .policy
+                    let default = policy.exits.default.clone();
+                    let entry = policy
                         .exits
                         .overrides
                         .entry(reason)
-                        .or_insert_with(|| ExitAction {
-                            trap: default_trap,
-                            read_set: RegBitmap::ALL,
-                            write_set: RegBitmap::ALL,
-                        });
+                        .or_insert(default);
                     entry.trap = trap;
                     let snapshot = entry.clone();
                     batch.add_policy_changed(
@@ -3207,18 +3478,12 @@ impl Capability<Domain> {
                     );
                 }
                 PolicyIdentifier::ExitReasonRegReadSet(reason, word) => {
-                    let default_trap = child_w.data.policy.exits.default.trap;
-                    let entry = child_w
-                        .data
-                        .policy
+                    let default = policy.exits.default.clone();
+                    let entry = policy
                         .exits
                         .overrides
                         .entry(reason)
-                        .or_insert_with(|| ExitAction {
-                            trap: default_trap,
-                            read_set: RegBitmap::ALL,
-                            write_set: RegBitmap::ALL,
-                        });
+                        .or_insert(default);
                     entry.read_set.set_word(word as usize, value);
                     batch.add_policy_changed(
                         child_id,
@@ -3230,18 +3495,12 @@ impl Capability<Domain> {
                     );
                 }
                 PolicyIdentifier::ExitReasonRegWriteSet(reason, word) => {
-                    let default_trap = child_w.data.policy.exits.default.trap;
-                    let entry = child_w
-                        .data
-                        .policy
+                    let default = policy.exits.default.clone();
+                    let entry = policy
                         .exits
                         .overrides
                         .entry(reason)
-                        .or_insert_with(|| ExitAction {
-                            trap: default_trap,
-                            read_set: RegBitmap::ALL,
-                            write_set: RegBitmap::ALL,
-                        });
+                        .or_insert(default);
                     entry.write_set.set_word(word as usize, value);
                     batch.add_policy_changed(
                         child_id,
@@ -3255,15 +3514,15 @@ impl Capability<Domain> {
 
                 // ── Processor feature interposition policy ──
                 PolicyIdentifier::ProcFeatureDefault(rk) => {
-                    let default = crate::interposition::DefaultAction::from_u8(value as u8)
+                    let default = u8::try_from(value).ok().and_then(crate::interposition::DefaultAction::from_u8)
                         .ok_or(CapaError::InvalidValue)?;
                     match rk {
                         ResourceKind::Cpuid => {
-                            child_w.data.policy.cpuid.default = default;
+                            policy.cpuid.default = default;
                             batch.add_policy_changed(child_id, PolicyChange::CpuidDefault(default));
                         }
                         ResourceKind::Msr => {
-                            child_w.data.policy.msrs.default = default;
+                            policy.msrs.default = default;
                             batch.add_policy_changed(child_id, PolicyChange::MsrDefault(default));
                             // The MsrDefault delta sets the bitmap background
                             // but clobbers existing override bits on the
@@ -3273,7 +3532,7 @@ impl Capability<Domain> {
                             // override so the bitmap converges to the full
                             // current policy without requiring the platform
                             // to re-read the engine.
-                            for rule in &child_w.data.policy.msrs.overrides {
+                            for rule in &policy.msrs.overrides {
                                 let (start, end) = match rule {
                                     crate::interposition::ProcFeaturePolicy::Trap(r)
                                     | crate::interposition::ProcFeaturePolicy::Native(r)
@@ -3306,16 +3565,14 @@ impl Capability<Domain> {
                     }
                 }
                 PolicyIdentifier::ProcFeatureRange(rk, start, start_sub, end, end_sub) => {
-                    let action = crate::interposition::DefaultAction::from_u8(value as u8)
+                    let action = u8::try_from(value).ok().and_then(crate::interposition::DefaultAction::from_u8)
                         .ok_or(CapaError::InvalidValue)?;
                     let result = match rk {
-                        ResourceKind::Cpuid => child_w
-                            .data
-                            .policy
+                        ResourceKind::Cpuid => policy
                             .cpuid
                             .insert_range(((start, start_sub), (end, end_sub)), action),
                         ResourceKind::Msr => {
-                            child_w.data.policy.msrs.insert_range((start, end), action)
+                            policy.msrs.insert_range((start, end), action)
                         }
                     };
                     result.map_err(|e| match e {
@@ -3343,9 +3600,8 @@ impl Capability<Domain> {
                 PolicyIdentifier::ProcFeatureEmulate(rk, key32, sub_key32, word) => match rk {
                     ResourceKind::Cpuid => {
                         cpuid_set_emulate_word(
-                            &mut child_w.data.policy.cpuid,
-                            key32,
-                            sub_key32,
+                            &mut policy.cpuid,
+                            ((key32, sub_key32), (key32, sub_key32)),
                             word,
                             value,
                         )?;
@@ -3360,7 +3616,7 @@ impl Capability<Domain> {
                         );
                     }
                     ResourceKind::Msr => {
-                        msr_set_emulate_word(&mut child_w.data.policy.msrs, key32, word, value)?;
+                        msr_set_emulate_word(&mut policy.msrs, (key32, key32), word, value)?;
                         batch.add_policy_changed(
                             child_id,
                             PolicyChange::MsrEmulate {
@@ -3371,87 +3627,205 @@ impl Capability<Domain> {
                         );
                     }
                 },
+                PolicyIdentifier::ProcFeatureEmulateRange(rk, start, start_sub, end, end_sub, word) => {
+                    match rk {
+                        ResourceKind::Cpuid => {
+                            cpuid_set_emulate_word(
+                                &mut policy.cpuid,
+                                ((start, start_sub), (end, end_sub)),
+                                word,
+                                value,
+                            )?;
+                            batch.add_policy_changed(
+                                child_id,
+                                PolicyChange::CpuidEmulateRange {
+                                    start: (start, start_sub),
+                                    end: (end, end_sub),
+                                    word_index: word,
+                                    value,
+                                },
+                            );
+                        }
+                        ResourceKind::Msr => {
+                            msr_set_emulate_word(&mut policy.msrs, (start, end), word, value)?;
+                            batch.add_policy_changed(
+                                child_id,
+                                PolicyChange::MsrRange {
+                                    start,
+                                    end,
+                                    action: crate::interposition::DefaultAction::Trap,
+                                },
+                            );
+                        }
+                    }
+                }
             }
 
+            let mut candidate = child_w.data.policy.clone();
+            match scope {
+                PolicyScope::Domain => candidate = policy,
+                PolicyScope::Vp(vp) => {
+                    candidate.set_vp_category(
+                        vp,
+                        id.execution_kind().ok_or(CapaError::InvalidValue)?,
+                        policy,
+                    );
+                    batch = UpdateBatch::new();
+                }
+            }
+            Self::validate_doorbell_policy(&child_w, &candidate)?;
+            child_w.data.policy = candidate;
+            if matches!(id.execution_kind(), Some(ExecutionPolicyKind::Msr | ExecutionPolicyKind::Exits)) {
+                add_interception_updates(&mut batch, child_id, &child_w.data.policy, scope);
+            }
             Ok(((), batch))
         })
         .map(|((), b)| b)
     }
 
-    /// Update the stored value of an existing MSR `Emulate` override on a
-    /// domain's *own* policy, at the domain's own runtime.
+    /// Handle an exit only if its saved domain/VP is still active after
+    /// acquiring the operation lock and processing pending core updates.
     ///
-    /// This is deliberately distinct from [`Capability::set_policy`]: that
-    /// API is parent-over-child, requires `MonitorAPI::SET`, and only works
-    /// while the child is `Unsealed`. Here the caller is the platform,
-    /// acting on behalf of the domain that is *currently executing* (e.g. a
-    /// guest `WRMSR` trapped because the MSR policy is `Emulate` but has no
-    /// internal capavisor emulator handler — see
-    /// `themis/capavisor/src/monitor.rs`'s WRMSR dispatch). Guest WRMSRs are
-    /// only ever handled once a domain is sealed and running, so there is
-    /// no seal/permission gate to apply.
-    ///
-    /// **Policy classification vs. value, and why post-seal mutation here
-    /// doesn't violate the "policy is fixed at seal" invariant**: every
-    /// other policy mutation in this file (`set_policy` et al.) requires
-    /// `Unsealed` because it can change a domain's *classification* —
-    /// which MSRs/CPUID leaves are `Trap`/`Native`/`Emulate`, what a child
-    /// is monotonically allowed relative to its parent, etc. — which is
-    /// exactly what gets measured at seal and is meant to be fixed
-    /// thereafter. This function cannot do any of that: it only ever
-    /// narrows the *value held inside* an `Emulate` entry that already
-    /// existed at seal time (attested as the initial value); it can never
-    /// create an entry, remove one, or change what is trapped. The guest
-    /// itself drives the value via its own `WRMSR`/`RDMSR` pair — treating
-    /// this as an ordinary policy write would make the "scratch register"
-    /// behavior this exists for impossible, since guest code (and thus
-    /// this call) can only ever run post-seal.
-    ///
-    /// Still goes through [`crate::platform::execute`] like every other
-    /// engine mutation (axiom A9: no direct capability-tree access outside
-    /// the capa-engine interface) so the write is properly serialized with
-    /// concurrent engine operations and emits a
-    /// [`crate::update::PolicyChange::MsrEmulate`] update the platform can
-    /// react to (today: idempotently re-asserts the MSR bitmap trap bit).
-    ///
-    /// # Errors
-    /// - [`CapaError::NotFound`] — no `Emulate` override exists for `msr`
-    ///   (callers should only invoke this after observing an `Emulate`
-    ///   action for the same MSR on the same domain).
+    /// `None` means the active VP changed while the lock was acquired;
+    /// the old exit must be discarded, not applied to the replacement.
+    /// The callback and any hardware handoff finish before releasing the
+    /// lock. Only use the context's methods for nested engine actions.
+    pub fn with_vp_exit<T>(
+        platform: &dyn Platform,
+        expected: &CoreBinding,
+        handle: impl FnOnce(VpExit<'_>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let core = platform.get_current_core().ok_or(CapaError::NotFound)?;
+        crate::platform::execute(platform, false, || {
+            apply_core_updates(platform, core)?;
+            let core = platform.switch_manager().get_core(core)?;
+            let binding = core.current_binding().ok_or(CapaError::NotFound)?;
+            if binding.vp_id != expected.vp_id || !Arc::ptr_eq(&binding.domain, &expected.domain) {
+                return Ok((None, UpdateBatch::new()));
+            }
+            let exit = VpExit::new(platform, &expected.domain)?;
+            require_core_binding(core, &expected.domain, exit.vp.id)?;
+            handle(exit).map(|result| (Some(result), UpdateBatch::new()))
+        })
+        .map(|(result, _)| result)
+    }
+
+    /// Write VP-local runtime state for an already-authorized writable MSR.
+    /// The sealed policy and its initial value are never modified.
     pub fn update_msr_emulate_value(
         platform: &dyn Platform,
         domain: &CapabilityRef<Domain>,
         msr: u32,
         value: u64,
     ) -> Result<UpdateBatch> {
-        use crate::update::PolicyChange;
-
         crate::platform::execute(platform, false, || -> Result<((), UpdateBatch)> {
-            let mut guard = domain.write();
-            let domain_id = guard.data.id;
-            guard
-                .data
-                .policy
-                .msrs
-                .update_emulate_value(&msr, value)
-                .map_err(|e| match e {
-                    crate::interposition::InsertError::NotFound => CapaError::NotFound,
-                    crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
-                    crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
-                })?;
-
-            let mut batch = UpdateBatch::new();
-            batch.add_policy_changed(
-                domain_id,
-                PolicyChange::MsrEmulate {
-                    msr,
-                    word_index: 0,
-                    value: value as u32,
-                },
-            );
-            Ok(((), batch))
+            VpExit::new(platform, domain)?.update_msr_emulate_value(msr, value)?;
+            Ok(((), UpdateBatch::new()))
         })
         .map(|((), b)| b)
+    }
+
+    pub fn cpuid_action(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        leaf: u32,
+        subleaf: u32,
+    ) -> Result<FeatureAction<CpuidResult>> {
+        crate::platform::execute(platform, false, || {
+            Ok((
+                VpExit::new(platform, caller)?.cpuid_action(leaf, subleaf),
+                UpdateBatch::new(),
+            ))
+        })
+        .map(|(action, _)| action)
+    }
+
+    pub fn msr_action(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        msr: u32,
+    ) -> Result<FeatureAction<u64>> {
+        crate::platform::execute(platform, false, || {
+            let action = VpExit::new(platform, caller)?.msr_action(msr);
+            Ok((action, UpdateBatch::new()))
+        })
+        .map(|(action, _)| action)
+    }
+
+    pub fn exit_action(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        reason: u32,
+    ) -> Result<ExitAction> {
+        crate::platform::execute(platform, false, || {
+            Ok((
+                VpExit::new(platform, caller)?.exit_action(reason),
+                UpdateBatch::new(),
+            ))
+        })
+        .map(|(action, _)| action)
+    }
+
+    pub fn interrupt_action(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        vector: u8,
+    ) -> Result<VectorPolicy> {
+        crate::platform::execute(platform, false, || {
+            let action = VpExit::new(platform, caller)?.interrupt_action(vector);
+            Ok((action, UpdateBatch::new()))
+        })
+        .map(|(action, _)| action)
+    }
+
+    pub fn clear_vp_policy(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        vp: u64,
+        kind: ExecutionPolicyKind,
+    ) -> Result<UpdateBatch> {
+        crate::platform::execute(platform, true, || {
+            let child = {
+                let parent = caller.read();
+                parent.data.require_api(MonitorAPI::SET)?;
+                parent
+                    .data
+                    .get_domain_capability(child_handle)
+                    .and_then(|cap| cap.upgrade())
+                    .ok_or(CapaError::NotFound)?
+            };
+            let mut domain = child.write();
+            if domain.is_endpoint() {
+                return Err(CapaError::PermissionDenied);
+            }
+            if domain.data.status != crate::domain::DomainStatus::Unsealed {
+                return Err(CapaError::DomainSealed);
+            }
+            require_vp(&domain.data.policy, vp)?;
+            let mut candidate = domain.data.policy.clone();
+            if let Some(overrides) = candidate.vp_policies.get_mut(&vp) {
+                match kind {
+                    ExecutionPolicyKind::Cpuid => overrides.cpuid = None,
+                    ExecutionPolicyKind::Msr => overrides.msrs = None,
+                    ExecutionPolicyKind::Exits => overrides.exits = None,
+                    ExecutionPolicyKind::Interrupts => overrides.interrupts = None,
+                }
+                Self::validate_doorbell_policy(&domain, &candidate)?;
+                domain.data.policy = candidate;
+            }
+            let mut batch = UpdateBatch::new();
+            if matches!(kind, ExecutionPolicyKind::Msr | ExecutionPolicyKind::Exits) {
+                add_interception_updates(
+                    &mut batch,
+                    domain.data.id,
+                    &domain.data.policy,
+                    PolicyScope::Vp(vp),
+                );
+            }
+            Ok(((), batch))
+        })
+        .map(|(_, batch)| batch)
     }
 
     /// Read a domain-wide policy field from a child domain.
@@ -3468,8 +3842,19 @@ impl Capability<Domain> {
         child_handle: LocalHandle,
         id: PolicyIdentifier,
     ) -> Result<(u64, UpdateBatch)> {
+        Self::get_policy_scoped(platform, caller, child_handle, PolicyScope::Domain, id)
+    }
+
+    pub fn get_policy_scoped(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        scope: PolicyScope,
+        id: PolicyIdentifier,
+    ) -> Result<(u64, UpdateBatch)> {
         crate::platform::execute(platform, false, || {
             caller.read().data.require_api(MonitorAPI::GET)?;
+            id.validate()?;
 
             let child_weak = caller
                 .read()
@@ -3479,61 +3864,71 @@ impl Capability<Domain> {
                 .clone();
             let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
             let child_r = child_ref.read();
+            if child_r.data.is_revoked() {
+                return Err(CapaError::DomainRevoked);
+            }
+            let policy = match scope {
+                PolicyScope::Domain => child_r.data.policy.clone(),
+                PolicyScope::Vp(vp) => {
+                    if id.execution_kind().is_none() {
+                        return Err(CapaError::InvalidValue);
+                    }
+                    require_vp(&child_r.data.policy, vp)?;
+                    child_r.data.policy.resolve_vp_policy(vp)
+                }
+            };
 
             let value = match id {
-                PolicyIdentifier::Cores => child_r.data.policy.cores,
-                PolicyIdentifier::ApiMonitor => child_r.data.policy.api.bits() as u64,
+                PolicyIdentifier::Cores => policy.cores,
+                PolicyIdentifier::ApiMonitor => policy.api.bits() as u64,
                 PolicyIdentifier::DefaultInterruptVisibility => {
-                    visibility_to_u64(child_r.data.policy.interrupts.default.visibility)
+                    visibility_to_u64(policy.interrupts.default.visibility)
                 }
+                PolicyIdentifier::DefaultInterruptRegReadSet(word) => policy.interrupts.default.read_set.word(word as usize),
+                PolicyIdentifier::DefaultInterruptRegWriteSet(word) => policy.interrupts.default.write_set.word(word as usize),
+                PolicyIdentifier::DefaultVectorInjectable => u64::from(policy.interrupts.default.injectable),
                 PolicyIdentifier::VectorVisibility(vec) => {
-                    visibility_to_u64(child_r.data.policy.interrupts.get_policy(vec).visibility)
+                    visibility_to_u64(policy.interrupts.get_policy(vec).visibility)
                 }
-                PolicyIdentifier::VectorRegReadSet(vec, word) => child_r
-                    .data
-                    .policy
+                PolicyIdentifier::VectorRegReadSet(vec, word) => policy
                     .interrupts
                     .get_policy(vec)
                     .read_set
                     .word(word as usize),
-                PolicyIdentifier::VectorRegWriteSet(vec, word) => child_r
-                    .data
-                    .policy
+                PolicyIdentifier::VectorRegWriteSet(vec, word) => policy
                     .interrupts
                     .get_policy(vec)
                     .write_set
                     .word(word as usize),
                 PolicyIdentifier::VectorInjectable(vec) => {
-                    if child_r.data.policy.interrupts.get_policy(vec).injectable {
+                    if policy.interrupts.get_policy(vec).injectable {
                         1
                     } else {
                         0
                     }
                 }
                 PolicyIdentifier::DefaultExitTrap => {
-                    if child_r.data.policy.exits.default.trap {
+                    if policy.exits.default.trap {
                         1
                     } else {
                         0
                     }
                 }
+                PolicyIdentifier::DefaultExitRegReadSet(word) => policy.exits.default.read_set.word(word as usize),
+                PolicyIdentifier::DefaultExitRegWriteSet(word) => policy.exits.default.write_set.word(word as usize),
                 PolicyIdentifier::ExitReasonTrap(reason) => {
-                    if child_r.data.policy.exits.get_action(reason).trap {
+                    if policy.exits.get_action(reason).trap {
                         1
                     } else {
                         0
                     }
                 }
-                PolicyIdentifier::ExitReasonRegReadSet(reason, word) => child_r
-                    .data
-                    .policy
+                PolicyIdentifier::ExitReasonRegReadSet(reason, word) => policy
                     .exits
                     .get_action(reason)
                     .read_set
                     .word(word as usize),
-                PolicyIdentifier::ExitReasonRegWriteSet(reason, word) => child_r
-                    .data
-                    .policy
+                PolicyIdentifier::ExitReasonRegWriteSet(reason, word) => policy
                     .exits
                     .get_action(reason)
                     .write_set
@@ -3541,12 +3936,13 @@ impl Capability<Domain> {
                 // ProcFeature policies are set-only for now; get returns the default.
                 PolicyIdentifier::ProcFeatureDefault(rk) => {
                     let default = match rk {
-                        ResourceKind::Cpuid => child_r.data.policy.cpuid.default,
-                        ResourceKind::Msr => child_r.data.policy.msrs.default,
+                        ResourceKind::Cpuid => policy.cpuid.default,
+                        ResourceKind::Msr => policy.msrs.default,
                     };
                     default as u64
                 }
                 PolicyIdentifier::ProcFeatureRange(..)
+                | PolicyIdentifier::ProcFeatureEmulateRange(..)
                 | PolicyIdentifier::ProcFeatureEmulate(..) => {
                     return Err(CapaError::NotSupported);
                 }
@@ -3668,6 +4064,9 @@ impl Capability<Domain> {
                 .ok_or(CapaError::NotFound)?
                 .clone();
             let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+            if child_ref.read().is_doorbell() {
+                return Err(CapaError::PermissionDenied);
+            }
             let result = f(platform, &child_ref)?;
             Ok((result, UpdateBatch::new()))
         })
@@ -3725,7 +4124,6 @@ impl Capability<Domain> {
             Ok((value, UpdateBatch::new()))
         })
     }
-
 }
 
 /// Compute a cryptographic hash of the physical memory backing a memory
@@ -3875,6 +4273,58 @@ fn visibility_from_u64(v: u64) -> Result<InterruptVisibility> {
     }
 }
 
+fn bool_from_u64(value: u64) -> Result<bool> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(CapaError::InvalidValue),
+    }
+}
+
+fn require_vp(policy: &DomainPolicy, vp: u64) -> Result<()> {
+    let index = usize::try_from(vp).map_err(|_| CapaError::NotFound)?;
+    match policy.vprocessor_states.get(index) {
+        Some(state) if state.id == vp => Ok(()),
+        _ => Err(CapaError::NotFound),
+    }
+}
+
+fn running_vp(platform: &dyn Platform, domain: &Domain) -> Result<VProcessorRef> {
+    if domain.is_revoked() {
+        return Err(CapaError::DomainRevoked);
+    }
+    if !domain.is_sealed() {
+        return Err(CapaError::DomainNotSealed);
+    }
+    let core = platform
+        .get_current_core()
+        .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
+    domain
+        .find_vp_on_core(core)
+        .ok_or_else(|| CapaError::InvalidOperation("no VP running on current core".to_string()))
+}
+
+fn add_interception_updates(
+    batch: &mut UpdateBatch,
+    domain: DomainId,
+    policy: &DomainPolicy,
+    scope: PolicyScope,
+) {
+    for vp in &policy.vprocessor_states {
+        if matches!(scope, PolicyScope::Vp(id) if id != vp.id) {
+            continue;
+        }
+        batch.add_policy_changed(
+            domain,
+            crate::update::PolicyChange::VpInterception {
+                vp_id: vp.id,
+                msrs: policy.msrs_for(vp.id).clone(),
+                exits: policy.exits_for(vp.id).clone(),
+            },
+        );
+    }
+}
+
 /// Shared validation for `set_register` and `get_register`.
 ///
 /// Returns `(child_domain_id, bitmap)` where `bitmap` is the read bitmap when
@@ -3887,11 +4337,14 @@ fn visibility_from_u64(v: u64) -> Result<InterruptVisibility> {
 ///
 /// `run_state` only picks which policy bucket applies (interrupt vector,
 /// exit reason, or the VECTOR_AVAILABLE default) — the bitmap itself is
-/// always domain-level policy, not anything VP-specific.
-fn write_set(child: &Domain, run_state: &VpRunState, want_read: bool) -> RegBitmap {
+/// resolved for the target VP, with domain defaults for absent overrides.
+fn write_set(child: &Domain, vp_id: u64, run_state: &VpRunState, want_read: bool) -> RegBitmap {
+    if child.status == crate::domain::DomainStatus::Unsealed {
+        return RegBitmap::ALL;
+    }
     match run_state {
         VpRunState::Waiting { vector, .. } => {
-            let policy = child.policy.interrupts.get_policy(*vector);
+            let policy = child.policy.interrupts_for(vp_id).get_policy(*vector);
             if want_read {
                 policy.read_set
             } else {
@@ -3901,7 +4354,7 @@ fn write_set(child: &Domain, run_state: &VpRunState, want_read: bool) -> RegBitm
         VpRunState::Available {
             last_exit_reason: Some(reason),
         } => {
-            let action = child.policy.exits.get_action(*reason);
+            let action = child.policy.exits_for(vp_id).get_action(*reason);
             if want_read {
                 action.read_set
             } else {
@@ -3909,7 +4362,7 @@ fn write_set(child: &Domain, run_state: &VpRunState, want_read: bool) -> RegBitm
             }
         }
         _ => {
-            let policy = child.policy.interrupts.get_policy(VECTOR_AVAILABLE);
+            let policy = child.policy.interrupts_for(vp_id).get_policy(VECTOR_AVAILABLE);
             if want_read {
                 policy.read_set
             } else {
@@ -3969,7 +4422,7 @@ fn register_access_check(
 
     // Select the correct policy source based on why the VP stopped (see
     // `write_set`'s doc for the Waiting/Available/default split).
-    let bitmap = write_set(&child_r.data, &run_state, want_read);
+    let bitmap = write_set(&child_r.data, vp_id, &run_state, want_read);
 
     Ok((child_domain_id, bitmap))
 }
@@ -3981,16 +4434,14 @@ fn register_access_check(
 /// - word 0: `value = (eax << 32) | ebx`
 /// - word 1: `value = (ecx << 32) | edx`
 ///
-/// If no emulate entry exists for `(leaf, subleaf)`, word 0 creates it.
-/// Word 1 then updates the existing entry.
+/// Word 0 creates or replaces the exact range; word 1 requires that range.
+/// A point inside an existing range must not silently change the whole range.
 fn cpuid_set_emulate_word(
     policy: &mut CpuidPolicy,
-    leaf: u32,
-    subleaf: u32,
+    target_range: ((u32, u32), (u32, u32)),
     word: u8,
     value: u64,
 ) -> Result<()> {
-    let key = (leaf, subleaf);
     match word {
         0 => {
             let hi = (value >> 32) as u32;
@@ -4001,10 +4452,15 @@ fn cpuid_set_emulate_word(
                 v2: 0,
                 v3: 0,
             };
-            // Try update first; if not found, insert new.
-            if policy.update_emulate_value(&key, result.clone()).is_err() {
+            if let Some(ProcFeaturePolicy::Emulate(_, stored)) = policy
+                .overrides
+                .iter_mut()
+                .find(|rule| matches!(rule, ProcFeaturePolicy::Emulate(r, _) if *r == target_range))
+            {
+                *stored = result;
+            } else {
                 policy
-                    .insert_emulate((key, key), result)
+                    .insert_emulate(target_range, result)
                     .map_err(|e| match e {
                         crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
                         crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
@@ -4022,7 +4478,7 @@ fn cpuid_set_emulate_word(
                 .iter()
                 .position(|rule| {
                     if let ProcFeaturePolicy::Emulate(range, _) = rule {
-                        key >= range.0 && key <= range.1
+                        *range == target_range
                     } else {
                         false
                     }
@@ -4044,16 +4500,28 @@ fn cpuid_set_emulate_word(
 /// - word 1: `value` = upper 32 bits of emulated MSR value
 ///
 /// Word 0 creates the entry; word 1 updates it.
-fn msr_set_emulate_word(policy: &mut MsrPolicy, msr: u32, word: u8, value: u64) -> Result<()> {
+fn msr_set_emulate_word(
+    policy: &mut MsrPolicy,
+    target_range: (u32, u32),
+    word: u8,
+    value: u64,
+) -> Result<()> {
     match word {
         0 => {
-            let lo = value as u64;
-            if policy.update_emulate_value(&msr, lo).is_err() {
-                policy.insert_emulate((msr, msr), lo).map_err(|e| match e {
-                    crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
-                    crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
-                    crate::interposition::InsertError::NotFound => CapaError::NotFound,
-                })?;
+            if let Some(ProcFeaturePolicy::Emulate(_, stored)) = policy
+                .overrides
+                .iter_mut()
+                .find(|rule| matches!(rule, ProcFeaturePolicy::Emulate(r, _) if *r == target_range))
+            {
+                *stored = value;
+            } else {
+                policy
+                    .insert_emulate(target_range, value)
+                    .map_err(|e| match e {
+                        crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
+                        crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
+                        crate::interposition::InsertError::NotFound => CapaError::NotFound,
+                    })?;
             }
             Ok(())
         }
@@ -4064,7 +4532,7 @@ fn msr_set_emulate_word(policy: &mut MsrPolicy, msr: u32, word: u8, value: u64) 
                 .iter()
                 .position(|rule| {
                     if let ProcFeaturePolicy::Emulate(range, _) = rule {
-                        range.0 <= msr && msr <= range.1
+                        *range == target_range
                     } else {
                         false
                     }

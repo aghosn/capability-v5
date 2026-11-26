@@ -23,6 +23,7 @@
 #ifdef __KERNEL__
 
 #include <linux/file.h>
+#include <linux/poll.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/rbtree.h>
@@ -34,6 +35,10 @@
 /* Forward declarations. */
 struct thhv_partition;
 struct thhv_vp;
+
+struct thhv_device {
+	struct list_head doorbells;
+};
 
 /* Per-capability entry in the driver's local capability table (§17). */
 struct thhv_cap_entry {
@@ -53,22 +58,13 @@ struct thhv_sent_cap {
 	u64 region_key;              /* guest_pfn of the mapping (for per-region unmap) */
 };
 
-/* Per-partition state. */
-
-/*
- * Per-ioeventfd entry: tracks one registered doorbell and the eventfd to
- * signal when the capavisor reports a matching guest write.
- */
-struct thhv_ioeventfd_entry {
-	struct list_head  node;
-	u64               doorbell_id;   /* returned by REGISTER_DOORBELL */
-	u64               addr;          /* guest GPA registered as doorbell */
-	u32               len;           /* access size (0 = any) */
-	u64               datamatch;     /* match value (0 if DATAMATCH flag not set) */
-	u32               flags;         /* ioctl flags */
-	struct eventfd_ctx *eventfd;
-	struct thhv_partition *partition;
+struct thhv_ept_meta_allocation {
+	struct list_head list;
+	struct page *head;
+	unsigned int order;
 };
+
+/* Per-partition state. */
 
 /*
  * Per-irqfd entry: when the eventfd fires, inject `vector` into the
@@ -103,18 +99,12 @@ struct thhv_partition {
 
 	struct thhv_vp **vps;
 
-	/* Shared META pages: MSR bitmap + IO bitmaps A & B.  Pinned at INITIALIZE. */
+	/* Domain-wide META pages, pinned before VP creation. */
 	struct page **shared_meta_pages;
 	unsigned int  shared_meta_nr_pages;
 
-	/* APIC-access sentinel page: mapped at GPA THHV_LAPIC_GPA so that
-	 * VIRTUALIZE_APIC_ACCESSES fires APIC_ACCESS exits for LAPIC accesses. */
-	struct page **apic_access_pages;
-	unsigned int  apic_access_nr_pages;
-
 	/* EPT META pages: kernel-allocated, sent to child for EPT page tables. */
-	struct page **ept_meta_pages;
-	unsigned int  ept_meta_nr_pages;
+	struct list_head ept_meta_allocations;
 
 	/* Memory region tracking: guest_pfn → pinned pages (for unpin on cleanup). */
 	struct {
@@ -134,17 +124,11 @@ struct thhv_partition {
 		struct mutex lock;
 	} irqfds;
 
-	/* IOEventFd / doorbell tracking. */
-	struct {
-		struct list_head list;
-		struct mutex lock;
-	} ioeventfds;
-
 	struct file *file;
 	struct kref refcount;
 
-	/* Channel capability handle: a channel pointing back to the parent
-	 * (dom0), automatically created and sent to the child at domain
+	/* Channel capability handle: a channel pointing back to this parent
+	 * domain, automatically created and sent to the child at domain
 	 * creation.  The child accepts it to send capabilities back. */
 	u64 chan_handle;
 
@@ -241,8 +225,6 @@ int thhv_hcall(u64 opcode, u64 arg0, u64 arg1, u64 arg2,
 int themis_create_domain(u64 cores_mask, u64 api_flags, u64 num_vps,
 				u64 *out_handle);
 int themis_seal(u64 domain);
-int themis_revoke_domain(u64 domain);
-int themis_revoke_mem(u64 parent, u64 child_sub);
 int themis_carve(u64 parent, u64 start, u64 size, u64 rights,
 			u64 *out_handle, u64 *out_sub);
 int themis_alias(u64 parent, u64 start, u64 size, u64 rights,
@@ -253,8 +235,6 @@ int themis_accept(u64 pending_id, u64 *out_handle);
 int themis_reject(u64 pending_id);
 int themis_switch(u64 target_domain, u64 vp_id);
 int themis_get_chan(u64 domain, u64 *out_handle);
-int themis_send_chan(u64 chan, u64 receiver, u64 attrs);
-int themis_accept_chan(u64 pending_id, u64 *out_handle);
 int themis_attest_self(u32 mode, u64 offset, u64 tx_sequence,
 		       u64 *out_total, u64 *out_wrote);
 int themis_read_pcr(u32 pcr_index, u64 *out_r0, u64 *out_r1, u64 *out_r2);
@@ -267,19 +247,28 @@ int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
 int themis_add_vp(u64 child_domain, u64 comm_cap);
 int themis_map_self(u64 cap_handle, u64 new_gpa);
 int themis_domcomm_notify(void);
-int themis_register_doorbell(u64 child_domain, u64 gpa, u64 size,
-			     u64 datamatch, u64 flags, u64 *out_doorbell_id);
-int themis_unregister_doorbell(u64 child_domain, u64 doorbell_id);
-int themis_set_themic_vector(u64 vector);
 int themis_inject_interrupt(u64 child_domain, u32 vp_id, u8 vector);
+int themis_create_doorbell(u64 child, u8 vector, u64 kind, u64 vp,
+			  u64 *handle, u64 *port);
+int themis_notify(u64 handle, u64 value);
+int themis_revoke(u64 parent, u64 sub);
+int thhv_doorbell_irq_init(void);
+void thhv_doorbell_irq_cleanup(void);
+unsigned int thhv_doorbell_vector(void);
+int thhv_test_doorbell_irq(unsigned int cpu);
+
+/* thhv_doorbell.c */
+long thhv_doorbell_create(struct thhv_device *device, void __user *uarg);
+long thhv_doorbell_eventfd(struct thhv_device *device, void __user *uarg);
+long thhv_doorbell_revoke(struct thhv_device *device, void __user *uarg);
+int thhv_doorbell_release(struct thhv_device *device);
+void thhv_dispatch_doorbell_event(const void *payload, u32 payload_size);
 
 /* thhv_part.c */
 long thhv_partition_create(struct file *dev_file, void __user *uarg);
 extern const struct file_operations thhv_partition_fops;
 
-/* thhv_ioeventfd.c */
-int  thhv_ioeventfd_assign(struct thhv_partition *part, struct thhv_ioeventfd __user *uarg);
-int  thhv_ioeventfd_deassign(struct thhv_partition *part, struct thhv_ioeventfd __user *uarg);
+/* thhv_rx.c */
 void thhv_drain_domcomm_rx(struct thhv_partition *part);
 
 /* thhv_irqfd.c */
@@ -323,6 +312,8 @@ int thhv_send_meta_pages(struct thhv_partition *part,
 			 struct page **pages, unsigned int nr_pages,
 			 u64 region_key);
 
+int thhv_send_ept_meta(struct thhv_partition *part, unsigned int nr_pages);
+
 /* Worst-case EPT-intermediate page count for [gpa, gpa+size) (thhv_part_mem.c). */
 unsigned int thhv_ept_meta_needed(u64 gpa, u64 size);
 
@@ -337,7 +328,7 @@ long thhv_debug_list_hpas(void __user *uarg);
 long thhv_debug_revoke_all(void);
 
 /* Per-partition collector used by thhv_debug_list_hpas (thhv_part_mem.c). */
-void thhv_collect_carved_runs(struct thhv_partition *part,
+int thhv_collect_carved_runs(struct thhv_partition *part,
 			      struct thhv_debug_hpa_range *scratch,
 			      u32 cap,
 			      u32 *nr_total,
@@ -356,9 +347,8 @@ void thhv_partitions_unregister(struct thhv_partition *part);
 /*
  * DomainComm ring accessor — page-aware byte-oriented ring.
  *
- * The ring may be backed by non-contiguous pages.  Messages never cross
- * page boundaries (invariant from design doc §6).  The driver maps each
- * page independently and uses this structure for ring I/O.
+ * The ring may be backed by non-contiguous pages and messages may span pages.
+ * The driver maps each page independently.
  */
 struct domcomm_ring {
 	void __iomem **page_vas;       /* Array of per-page virtual addresses */
@@ -378,7 +368,8 @@ struct domcomm_state {
 	u64                   gpa;     /* GPA of the region (from CPUID) */
 	unsigned int          total_pages;
 	bool                  initialized;
-	u64                   self_domain_handle; /* for REGISTER_COMM self-ref */
+	u32                   features; /* CPUID DomainComm feature bits */
+	u64                   domain_id; /* from the initial self-attestation */
 };
 
 /* domcomm ring helpers (thhv_domcomm.c) */
@@ -386,6 +377,8 @@ int  domcomm_init(void);
 void domcomm_cleanup(void);
 int  domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
 			u32 buf_size, u32 *out_type, u32 *out_payload_size);
+int domcomm_rx_dequeue_reply(struct domcomm_ring *ring, void *buf, u32 buf_size,
+			     u32 expected_type, u32 *out_payload_size);
 /* Drop the message at the ring head without copying its payload.  Used by
  * consumers that don't recognise (or can't fit) the next message but still
  * need the ring to drain so subsequent producers/consumers make progress.
@@ -397,9 +390,16 @@ int  domcomm_tx_enqueue(struct domcomm_ring *ring, u32 msg_type,
 			const void *payload, u32 payload_size,
 			u64 *out_sequence);
 int  domcomm_request_grow(bool grow_rx, u32 nr_pages);
+int themis_domcomm_notify_grow(u64 *pages, u64 *capacity);
+int thhv_doorbell_target_vp(unsigned int cpu, u64 *vp);
+int thhv_hpa_to_gpa(u64 hpa, u64 *gpa);
+
+#define THHV_DOMCOMM_PAGE_LIST (1U << 0)
+#define THHV_DOMCOMM_SYNC_GROW (1U << 1)
 
 /* Global DomainComm instance. */
 extern struct domcomm_state thhv_domcomm;
+extern struct mutex thhv_domcomm_lock;
 
 #endif /* __KERNEL__ */
 

@@ -77,6 +77,183 @@ fn setup_parent_child() -> (CapabilityRef<Domain>, CapabilityRef<Domain>, LocalH
 
 // ── 1. Basic registration ─────────────────────────────────────────────────────
 
+#[test]
+fn sent_domain_comm_revocation_invalidates_before_reuse() {
+    for sealed in [false, true] {
+        let platform = common::TestPlatform::new();
+        let (parent, child, child_h, _root) = setup_parent_child();
+        let parent_id = parent.read().data.id;
+        let child_id = child.read().data.id;
+        let (vp_comm, _, _) =
+            Capability::carve(&platform, &parent, 1, Access::new(0x8000, 0x1000, Rights::RW)).unwrap();
+        Capability::register_comm(&platform, &parent, vp_comm, child_h, 0).unwrap();
+        let (comm, sub, _) =
+            Capability::carve(&platform, &parent, 1, Access::new(0x1000, 0x2000, Rights::RW)).unwrap();
+        Capability::send_at(
+            &platform,
+            &parent,
+            comm,
+            child_h,
+            Attributes::from_bits(Attributes::COMM),
+            Some(0x8000_0000),
+        ).unwrap();
+        let received = *child.read().data.memory_capabilities.keys().next().unwrap();
+        if sealed {
+            Capability::seal(&platform, &parent, child_h).unwrap();
+            Capability::with_domain_comm(&platform, &child, received, |access, gpa| {
+                assert_eq!(access.start, 0x1000);
+                assert_eq!(access.size, 0x2000);
+                assert_eq!(gpa, if cfg!(feature = "address_translation") {
+                    0x8000_0000
+                } else {
+                    0x1000
+                });
+                Ok(())
+            }).unwrap();
+        }
+
+        platform.drain_updates();
+        Capability::revoke(&platform, &parent, 1, sub).unwrap();
+        let updates = platform.drain_updates();
+        let uncomm = updates.iter().position(|u| matches!(u,
+            Update::UncommRegion { domain_id, target_domain_id, vp_id: u32::MAX, phys: 0x1000, size: 0x2000 }
+                if *domain_id == child_id && *target_domain_id == child_id
+        )).expect("sent COMM must invalidate the domain-level channel, not VP 0");
+        let zero = updates.iter().position(|u| matches!(u,
+            Update::ZeroMemory { address: 0x1000, size: 0x2000 }
+        )).expect("COMM backing must be zeroed");
+        let restore = updates.iter().position(|u| matches!(u,
+            Update::ChangeRights { domain, physical: 0x1000, rights, .. }
+                if *domain == parent_id && *rights != Rights::NONE
+        )).expect("parent must regain the backing");
+        assert!(uncomm < zero && zero < restore);
+        assert!(!updates.iter().any(|u| matches!(u,
+            Update::UncommRegion { vp_id: 0, .. } | Update::RevokeDomain { .. }
+        )));
+        assert!(child.read().data.get_memory_capability(received).is_none());
+        assert!(child.read().data.comm_bindings[0].upgrade().unwrap().read().owned.attributes.comm());
+    }
+}
+
+#[test]
+fn sent_comm_invalidates_before_descendant_cleanup() {
+    let platform = common::TestPlatform::new();
+    let (parent, _child, child_h, _root) = setup_parent_child();
+    let (other_h, _) =
+        Capability::create(&platform, &parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let (comm, sub, _) =
+        Capability::carve(&platform, &parent, 1, Access::new(0x1000, 0x2000, Rights::RW)).unwrap();
+    let (nested, _, _) =
+        Capability::carve(&platform, &parent, comm, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    Capability::send(
+        &platform, &parent, nested, other_h, Attributes::from_bits(Attributes::CLEAN),
+    ).unwrap();
+    Capability::send(
+        &platform, &parent, comm, child_h, Attributes::from_bits(Attributes::COMM),
+    ).unwrap();
+
+    let batch = Capability::revoke(&platform, &parent, 1, sub).unwrap();
+    let uncomm = batch.updates().iter().position(|u| matches!(u,
+        Update::UncommRegion { vp_id: u32::MAX, phys: 0x1000, size: 0x2000, .. }
+    )).unwrap();
+    for (index, update) in batch.updates().iter().enumerate() {
+        if matches!(update, Update::ZeroMemory { .. } | Update::ChangeRights { .. }) {
+            assert!(uncomm < index, "invalidate COMM before reclaiming any covered subregion");
+        }
+    }
+}
+
+#[test]
+fn sent_comm_domain_teardown_releases_each_region_once() {
+    let platform = common::TestPlatform::new();
+    let (parent, child, child_h, _root) = setup_parent_child();
+    let child_id = child.read().data.id;
+    for start in [0x1000, 0x2000] {
+        let (comm, _, _) =
+            Capability::carve(&platform, &parent, 1, Access::new(start, 0x1000, Rights::RW)).unwrap();
+        Capability::send(
+            &platform, &parent, comm, child_h, Attributes::from_bits(Attributes::COMM),
+        ).unwrap();
+    }
+    let (vp_comm, _, _) =
+        Capability::carve(&platform, &parent, 1, Access::new(0x8000, 0x1000, Rights::RW)).unwrap();
+    Capability::register_comm(&platform, &parent, vp_comm, child_h, 0).unwrap();
+    Capability::seal(&platform, &parent, child_h).unwrap();
+
+    let batch = Capability::revoke_domain(&platform, &parent, child_h).unwrap();
+    for phys in [0x1000, 0x2000, 0x8000] {
+        let vp = if phys == 0x8000 { 0 } else { u32::MAX };
+        assert_eq!(batch.updates().iter().filter(|u| matches!(u,
+            Update::UncommRegion { target_domain_id, vp_id, phys: address, .. }
+                if *target_domain_id == child_id && *vp_id == vp && *address == phys
+        )).count(), 1);
+    }
+}
+
+#[test]
+fn child_can_register_multiple_self_comm_regions_without_a_self_handle() {
+    let platform = common::TestPlatform::new();
+    let (parent, child, child_h, _root) = setup_parent_child();
+    let (memory, _, _) =
+        Capability::carve(&platform, &parent, 1, Access::new(0, 0x4000, Rights::RW)).unwrap();
+    Capability::send(&platform, &parent, memory, child_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &parent, child_h).unwrap();
+    let received = *child.read().data.memory_capabilities.keys().next().unwrap();
+    let (first, first_sub, _) =
+        Capability::carve(&platform, &child, received, Access::new(0, 0x1000, Rights::RW)).unwrap();
+    let (second, _, _) =
+        Capability::carve(&platform, &child, received, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    assert!(Capability::with_domain_comm(&platform, &child, first, |_, _| Ok(())).is_err());
+    assert!(Capability::register_comm(&platform, &child, first, SELF_CAPABILITY, 0).is_err());
+    #[cfg(feature = "address_translation")]
+    Capability::map_self(&platform, &child, first, 0x8000_0000).unwrap();
+    for handle in [first, second] {
+        Capability::register_comm(&platform, &child, handle, SELF_CAPABILITY, u32::MAX).unwrap();
+        Capability::with_domain_comm(&platform, &child, handle, |access, gpa| {
+            assert!(platform.operation_lock_is_held());
+            assert_eq!(access.size, 0x1000);
+            let expected = if cfg!(feature = "address_translation") && handle == first {
+                0x8000_0000
+            } else {
+                access.start
+            };
+            assert_eq!(expected, gpa);
+            Ok(())
+        }).unwrap();
+    }
+    let (vp_comm, _, _) =
+        Capability::carve(&platform, &parent, 1, Access::new(0x8000, 0x1000, Rights::RW)).unwrap();
+    Capability::register_comm(&platform, &parent, vp_comm, child_h, 0).unwrap();
+    let batch = Capability::revoke(&platform, &child, received, first_sub).unwrap();
+    assert!(batch.updates().iter().any(|update|
+        matches!(update, Update::UncommRegion { vp_id: u32::MAX, .. })));
+    assert!(Capability::with_domain_comm(&platform, &child, first, |_, _| Ok(())).is_err());
+}
+
+#[test]
+fn self_comm_rejects_read_only_memory_and_rechecks_after_lock_acquisition() {
+    let platform = Arc::new(common::TestPlatform::new());
+    let parent = make_domain();
+    let _root = register_root_mem(&parent, 1);
+    let (read_only, _, _) =
+        Capability::carve(&*platform, &parent, 1, Access::new(0, 0x1000, Rights::R)).unwrap();
+    assert!(matches!(
+        Capability::register_comm(&*platform, &parent, read_only, SELF_CAPABILITY, u32::MAX),
+        Err(CapaError::InvalidAccess)
+    ));
+    let (comm, sub, _) =
+        Capability::carve(&*platform, &parent, 1, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    Capability::register_comm(&*platform, &parent, comm, SELF_CAPABILITY, u32::MAX).unwrap();
+    let revoke_platform = platform.clone();
+    let revoke_parent = parent.clone();
+    platform.before_next_shared_lock(move || {
+        Capability::revoke(&*revoke_platform, &revoke_parent, 1, sub).unwrap();
+    });
+    assert_eq!(Capability::with_domain_comm(&*platform, &parent, comm, |_, _|
+        panic!("revoked memory must never reach the platform callback")), Err::<(), _>(CapaError::NotFound));
+}
+
 /// Registering a carved exclusive region succeeds, sets COMM|CLEAN (not VITAL),
 /// emits exactly one CommRegion update with the correct fields.
 #[test]
@@ -341,6 +518,11 @@ fn test_comm_revocation_emits_uncomm_region() {
             if *domain_id == parent_id && *phys == 0x0 && *size == 0x1000)
     });
     assert!(has_uncomm, "revoking a COMM cap must emit UncommRegion");
+    let uncomm = batch.updates().iter()
+        .position(|u| matches!(u, Update::UncommRegion { .. })).unwrap();
+    let zero = batch.updates().iter()
+        .position(|u| matches!(u, Update::ZeroMemory { .. })).unwrap();
+    assert!(uncomm < zero, "VP COMM must be invalidated before zeroing");
 }
 
 // ── 11. Revoking COMM does NOT trigger domain revocation ─────────────────────

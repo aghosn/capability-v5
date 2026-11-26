@@ -121,20 +121,11 @@ impl IvshmemDevice {
     }
 
     /// Ring the doorbell by writing to BAR0 + 0xC.
-    ///
-    /// Ring the doorbell register in BAR0 via a VMCALL to the capavisor.
-    ///
-    /// The capavisor matches the GPA against the caller's doorbell list and
-    /// enqueues a notification to the parent domain's DomainComm RX ring.
     pub fn ring_doorbell(&self, value: u32) {
         let gpa = self.bar0_gpa + bar0::REG_DOORBELL;
+        // BAR0 is identity-mapped device MMIO; the VMM implements its protocol.
         unsafe {
-            libthemis::raw_vmcall(
-                themis_abi::opcodes::THEMIS_RING_DOORBELL,
-                gpa as u64,
-                value as u64,
-                0, 0, 0,
-            );
+            core::ptr::write_volatile(gpa as *mut u32, value);
         }
     }
 

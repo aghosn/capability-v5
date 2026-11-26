@@ -92,3 +92,106 @@ fn test_attest_self_structured_requires_sealed_and_permission() {
     let child_id = child_ref.read().data.id;
     assert_eq!(report.domain_id, child_id);
 }
+
+#[test]
+fn self_attestation_delivery_holds_operation_lock_and_propagates_errors() {
+    let platform = common::TestPlatform::new();
+    let root = Capability::new_root(0, 0, Domain::new_root(1));
+    let root_id = root.read().data.id;
+    for generate in [true, false] {
+        let error = Capability::with_self_attestation(&platform, &root, generate, |id, report| {
+            assert_eq!(id, root_id);
+            assert!(
+                platform.operation_lock_is_held(),
+                "revocation must remain excluded"
+            );
+            if generate {
+                assert_eq!(report.unwrap().domain_id, root_id);
+            } else {
+                assert!(report.is_none());
+            }
+            Err::<(), _>(CapaError::NotificationQueueFull)
+        })
+        .unwrap_err();
+        assert_eq!(error, CapaError::NotificationQueueFull);
+        assert!(
+            !platform.operation_lock_is_held(),
+            "delivery errors must release the lock"
+        );
+    }
+}
+
+#[test]
+fn self_attestation_continuation_does_not_read_inventory() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let platform = common::TestPlatform::new();
+    let root = Capability::new_root(0, 0, Domain::new_root(1));
+    let child_h = Capability::create(
+        &platform,
+        &root,
+        DomainPolicy::new_restricted(1, MonitorAPI::ALL),
+    )
+    .unwrap()
+    .0;
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    Capability::with_self_attestation(&platform, &root, true, |_, report| {
+        assert_eq!(report.unwrap().dom_caps.len(), 1);
+        Ok(())
+    })
+    .unwrap();
+
+    // A report walk would block on this inventory entry; validation must not.
+    let inventory_guard = child.write();
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            Capability::with_self_attestation(&platform, &root, false, |_, report| {
+                assert!(report.is_none());
+                tx.send(()).unwrap();
+                Ok(())
+            })
+        });
+        let completed = rx.recv_timeout(Duration::from_secs(5));
+        drop(inventory_guard);
+        worker.join().unwrap().unwrap();
+        completed.expect("continuation walked the inventory instead of serving cached data");
+    });
+}
+
+#[test]
+fn self_attestation_validates_initial_and_continuation_callers() {
+    let platform = common::TestPlatform::new();
+    let root = Capability::new_root(0, 0, Domain::new_root(1));
+    let child_h = Capability::create(
+        &platform,
+        &root,
+        DomainPolicy::new_restricted(1, MonitorAPI::NONE),
+    )
+    .unwrap()
+    .0;
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    let rejected = |expected| {
+        for generate in [true, false] {
+            let result = Capability::with_self_attestation(
+                &platform,
+                &child,
+                generate,
+                |_, _| -> Result<()> {
+                    panic!("unauthorized attestation reached delivery");
+                },
+            );
+            assert_eq!(result.unwrap_err(), expected);
+        }
+    };
+    rejected(CapaError::DomainNotSealed);
+    Capability::seal(&platform, &root, child_h).unwrap();
+    rejected(CapaError::ApiNotAllowed);
+    Capability::revoke_domain(&platform, &root, child_h).unwrap();
+    rejected(CapaError::DomainRevoked);
+}

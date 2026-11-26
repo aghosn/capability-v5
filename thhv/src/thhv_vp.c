@@ -137,35 +137,17 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 		 * exits.  On return, the capavisor has written a
 		 * themic_intercept_message to the intercept slot.
 		 *
-		 * If the child was preempted by a physical interrupt while
-		 * running, themis_switch() returns -EAGAIN (ERR_RETRY).  We
-		 * check for pending signals and retry; this is the mechanism
-		 * that allows Ctrl-C / SIGINT to interrupt a running VP.
+		 * Interrupt unwind returns -EAGAIN, including Sync doorbells.
+		 * Return it to userspace after draining RX so the VMM can
+		 * service shared requests before resuming the donated VP.
 		 */
 retry_switch:
-		do {
-			ret = themis_switch(part->domain_handle, vp->vp_index);
-			if (ret != -EAGAIN)
-				break;
-			/* Drain DomainComm RX on every ERR_RETRY iteration.
-			 * Doorbells hit via the capavisor fast-path queue
-			 * notifications here; if we don't drain between
-			 * SWITCH retries the child may deadlock waiting for
-			 * a completion interrupt whose doorbell was never
-			 * forwarded to CHV. */
+		ret = themis_switch(part->domain_handle, vp->vp_index);
+		if (ret == -EAGAIN) {
 			thhv_drain_domcomm_rx(part);
-			if (signal_pending(current)) {
-				mutex_unlock(&vp->run_lock);
-				return -EINTR;
-			}
-			/* Force a scheduling point so dom0 can service
-			 * timers, network, and SSH even when the child
-			 * is interrupt-heavy.  usleep_range() puts this
-			 * thread to sleep for ~50-100µs, which is long
-			 * enough for the scheduler to run other tasks
-			 * but short enough not to hurt throughput. */
-			usleep_range(50, 100);
-		} while (true);
+			mutex_unlock(&vp->run_lock);
+			return signal_pending(current) ? -EINTR : -EAGAIN;
+		}
 		if (ret) {
 			mutex_unlock(&vp->run_lock);
 			return ret;
@@ -200,17 +182,7 @@ retry_switch:
 			goto retry_switch;
 		}
 
-		/* DOORBELL exit: child rang a doorbell via VMCALL.
-		 * The capavisor already enqueued a DOORBELL_NOTIFY
-		 * on our DomainComm RX ring.  Drain it (signals
-		 * matching ioeventfds) and forward to userspace
-		 * so CHV can log the event. */
-		if (slot.msg.exit_reason == THHV_EXIT_REASON_DOORBELL) {
-			thhv_drain_domcomm_rx(part);
-		}
-
-		/* Drain the DomainComm RX ring: signal any ioeventfds whose
-		 * doorbell was hit while the child was running. */
+		/* Dispatch capability-authorized recipient-port notifications. */
 		thhv_drain_domcomm_rx(part);
 
 	} else {
@@ -538,7 +510,7 @@ static void thhv_vp_unpin_pages(struct thhv_vp *vp)
 
 	/* Revoke COMM capability (unbinds in the capavisor). */
 	if (vp->comm_registered) {
-		themis_revoke_mem(vp->comm_parent_handle, vp->comm_cap_sub);
+		themis_revoke(vp->comm_parent_handle, vp->comm_cap_sub);
 		thhv_cap_table_remove(vp->comm_cap_handle);
 		vp->comm_registered = false;
 	}
@@ -600,7 +572,7 @@ static int thhv_vp_pin_pages(struct thhv_vp *vp,
 
 	vp->comm_kaddr = kmap(vp->comm_page);
 
-	/* Translate COMM page dom0 GPA → HPA. */
+	/* Translate the COMM page's caller GPA to HPA. */
 	ret = thhv_translate_pages(&vp->comm_page, 1, &segs, &nr_segs);
 	if (ret)
 		goto err_unmap_comm;
@@ -737,7 +709,7 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 					    vp->comm_cap_sub,
 					    vp->comm_phys, PAGE_SIZE);
 		if (ret) {
-			themis_revoke_mem(parent_handle, vp->comm_cap_sub);
+			themis_revoke(parent_handle, vp->comm_cap_sub);
 			goto err_unpin;
 		}
 	}
@@ -788,7 +760,7 @@ err_put_fd:
 	put_unused_fd(fd);
 err_revoke_comm:
 	if (vp->comm_registered || vp->comm_cap_handle) {
-		themis_revoke_mem(vp->comm_parent_handle, vp->comm_cap_sub);
+		themis_revoke(vp->comm_parent_handle, vp->comm_cap_sub);
 		thhv_cap_table_remove(vp->comm_cap_handle);
 		vp->comm_registered = false;
 	}

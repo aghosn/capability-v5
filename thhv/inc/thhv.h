@@ -16,7 +16,6 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
-#include <linux/poll.h>
 
 /* ── THHV ioctl magic ──────────────────────────────────────────────────────── */
 
@@ -48,7 +47,7 @@
 #define THHV_SCHED_ASYNC  1
 
 /* META pages the capavisor needs per VP (VMCS + VAPIC). */
-#define THHV_META_PAGES_PER_VP  3
+#define THHV_META_PAGES_PER_VP  7
 
 /* Maximum VPs per domain.  Must equal `themis_abi::MAX_VPS_PER_DOMAIN`
  * (single source of truth on the Rust side).  Enforced both here (thhv
@@ -73,8 +72,7 @@
 #define THEMIS_HC_REJECT             0x05
 #define THEMIS_HC_CREATE_DOMAIN      0x06
 #define THEMIS_HC_SEAL               0x07
-#define THEMIS_HC_REVOKE_MEM         0x08
-#define THEMIS_HC_REVOKE_DOMAIN      0x09
+#define THEMIS_HC_REVOKE             0x08
 #define THEMIS_HC_SWITCH             0x0A
 #define THEMIS_HC_GET_CHAN            0x0B
 #define THEMIS_HC_ATTEST_SELF        0x0C
@@ -84,15 +82,10 @@
 #define THEMIS_HC_ASSIGN_DEVICE      0x12
 #define THEMIS_HC_ENUMERATE          0x13
 #define THEMIS_HC_ADD_VP             0x14
-#define THEMIS_HC_REGISTER_DOORBELL  0x15
-#define THEMIS_HC_UNREGISTER_DOORBELL 0x16
-#define THEMIS_HC_SET_THEMIC_VECTOR  0x17
 #define THEMIS_HC_REGISTER_COMM      0x18
 #define THEMIS_HC_INJECT_INTERRUPT   0x1b
 #define THEMIS_HC_READ_PCR           0x1e
 #define THEMIS_HC_MAP_SELF           0x1f
-#define THEMIS_HC_SEND_CHAN          0x20
-#define THEMIS_HC_ACCEPT_CHAN        0x21
 #define THEMIS_HC_SET_POLICY        0x22
 
 /* ── Themis hypercall opcodes (RAX in) ─────────────────────────────────────── */
@@ -105,8 +98,7 @@
 #define THEMIS_OP_REJECT              0x05
 #define THEMIS_OP_CREATE_DOMAIN       0x06
 #define THEMIS_OP_SEAL                0x07
-#define THEMIS_OP_REVOKE_MEM          0x08
-#define THEMIS_OP_REVOKE_DOMAIN       0x09
+#define THEMIS_OP_REVOKE              0x08
 #define THEMIS_OP_SWITCH              0x0A
 #define THEMIS_OP_GET_CHAN             0x0B
 #define THEMIS_OP_ATTEST_SELF         0x0C
@@ -116,18 +108,18 @@
 #define THEMIS_OP_ASSIGN_DEVICE       0x12
 #define THEMIS_OP_ENUMERATE           0x13
 #define THEMIS_OP_ADD_VP              0x14
-#define THEMIS_OP_REGISTER_DOORBELL   0x15
-#define THEMIS_OP_UNREGISTER_DOORBELL 0x16
-#define THEMIS_OP_SET_THEMIC_VECTOR   0x17
 #define THEMIS_OP_REGISTER_COMM       0x18
 #define THEMIS_OP_DOMCOMM_NOTIFY     0x19
 #define THEMIS_OP_INJECT_INTERRUPT   0x1b
 #define THEMIS_OP_TOGGLE_DEBUG      0x1d
 #define THEMIS_OP_READ_PCR          0x1e
 #define THEMIS_OP_MAP_SELF          0x1f
-#define THEMIS_OP_SEND_CHAN        0x20
-#define THEMIS_OP_ACCEPT_CHAN      0x21
 #define THEMIS_OP_SET_POLICY      0x22
+#define THEMIS_OP_CREATE_DOORBELL 0x24
+#define THEMIS_OP_NOTIFY          0x25
+#define THEMIS_CAP_SELF           (~0ULL)
+#define THEMIS_DOORBELL_SYNC      0
+#define THEMIS_DOORBELL_ASYNC     1
 
 /* ── Policy-kind discriminants for THEMIS_OP_SET_POLICY ────────────────────── */
 
@@ -146,6 +138,11 @@
  * value through to themis_set_policy() opaquely (see THHV_SET_POLICY below).
  */
 #define THEMIS_POLICY_VECTOR_INJECTABLE        16
+#define THEMIS_POLICY_DEFAULT_INTR_REG_READ_SET 17
+#define THEMIS_POLICY_DEFAULT_INTR_REG_WRITE_SET 18
+#define THEMIS_POLICY_DEFAULT_EXIT_REG_READ_SET 19
+#define THEMIS_POLICY_DEFAULT_EXIT_REG_WRITE_SET 20
+#define THEMIS_POLICY_DEFAULT_VECTOR_INJECTABLE 21
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
@@ -161,6 +158,7 @@
 #define THEMIS_ERR_RACE      8
 #define THEMIS_ERR_UNIMPL    (~0ULL)
 
+#ifdef __KERNEL__
 /*
  * Raw VMCALL primitive — 5 inputs, 3 outputs.
  *
@@ -206,6 +204,7 @@ static inline int __themis_to_errno(u64 status)
 	default:                  return -EIO;
 	}
 }
+#endif
 
 /* ── UAPI structures ──────────────────────────────────────────────────────── */
 
@@ -224,12 +223,6 @@ struct thhv_create_vp {
 	__u64 comm_uaddr;     /* Userspace VA of COMM page (PAGE_SIZE) */
 };
 
-/* Guest physical address of the LAPIC MMIO window.  The capavisor maps the
- * apic_access page here so VIRTUALIZE_APIC_ACCESSES fires APIC_ACCESS exits
- * instead of EPT violations for child-domain LAPIC accesses.
- */
-#define THHV_LAPIC_GPA	0xFEE00000ULL
-
 /* ── VM exit reasons (Intel SDM Vol 3C §27.9.1, Appendix C) ──────────── */
 #define THHV_EXIT_REASON_CPUID		10
 #define THHV_EXIT_REASON_HLT		12
@@ -239,7 +232,7 @@ struct thhv_create_vp {
 #define THHV_EXIT_REASON_EPT_VIOLATION	48
 
 /* ── Synthetic exit reasons (high bit set, not hardware VMX reasons) ──── */
-#define THHV_EXIT_REASON_DOORBELL	0x80000001u
+#define THHV_EXIT_REASON_YIELD		0x80000003u
 
 /* ── VP activity / MP state (Intel SDM Vol 3C §24.4.2) ───────────────── */
 #define THHV_MP_STATE_RUNNABLE		0
@@ -253,8 +246,8 @@ struct thhv_create_vp {
 struct thhv_initialize_partition {
 	__u64 meta_uaddr;          /* Userspace VA of shared META pages */
 	__u64 meta_size;           /* Size in bytes (must be PAGE_SIZE * META_PAGES_SHARED) */
-	__u64 apic_access_uaddr;   /* Userspace VA of APIC-access sentinel page (PAGE_SIZE) */
-	__u64 apic_access_size;    /* Must be PAGE_SIZE */
+	__u64 apic_access_uaddr;   /* Reserved; must be zero */
+	__u64 apic_access_size;    /* Reserved; must be zero */
 };
 
 /* Shared-memory rendezvous constants (used in thhv_set_guest_memory). */
@@ -516,7 +509,6 @@ void thhv_comm_set_reg(struct thhv_vp_comm_page *comm, unsigned int reg, __u64 v
 
 #define THEMIC_NUM_CHANNELS       16
 #define THEMIC_MSG_SLOT_SIZE      256   /* bytes per slot */
-#define THEMIC_MAX_DOORBELLS      128
 
 /* Channel indices (slots in the message page). */
 #define THEMIC_CHAN_INTERCEPT      0     /* VP exit / intercept messages */
@@ -616,27 +608,6 @@ struct themic_event_flag_page {
 	__u8  reserved[4096 - THEMIC_NUM_CHANNELS * 8];
 };
 
-/* === Doorbell Table === */
-
-#define THEMIC_DOORBELL_FLAG_TRIGGER_ANY_VALUE  (1 << 0)
-#define THEMIC_DOORBELL_FLAG_TRIGGER_SIZE_ANY   (1 << 1)
-#define THEMIC_DOORBELL_FLAG_PIO                (1 << 2)
-
-struct themic_doorbell_entry {
-	__u64 gpa;
-	__u64 datamatch;
-	__u32 size;
-	__u32 flags;                  /* THEMIC_DOORBELL_FLAG_* */
-	__u32 doorbell_id;
-	__u32 reserved;
-};
-
-struct themic_doorbell_table {
-	__u32 count;
-	__u32 capacity;
-	struct themic_doorbell_entry entries[THEMIC_MAX_DOORBELLS];
-};
-
 /*
  * RUN_VP ioctl: on return, msg_buf contains a themic_intercept_message
  * (256 bytes = one message slot) copied from the ThemIC message page
@@ -653,18 +624,18 @@ struct thhv_run_vp {
  * interrupt events, ring growth, and capability enumeration.
  *
  * For dom0: pre-allocated by capavisor, discovered via CPUID leaf 0x40000002.
- * See thhv/docs/domain-comm-v0.2.md for the full design.
+ * See docs/domain-comm.md for the original design.
  */
 
 #define DOMCOMM_MAGIC         0x444F4D43  /* "DOMC" */
-#define DOMCOMM_VERSION_MAJOR 0
-#define DOMCOMM_VERSION_MINOR 2
+#define DOMCOMM_VERSION_MAJOR 1
+#define DOMCOMM_VERSION_MINOR 0
 
 /* ── DomainComm message types ───────────────────────────────────────────────
  *
- * Messages never cross page boundaries.  When a message doesn't fit in the
- * remaining space of the current page, the producer writes a padding message
- * (type=0) and starts the real message at the top of the next page.
+ * Version 1 uses the largest power-of-two capacity within the backing pages.
+ * RX messages may cross page/ring boundaries and publish their head once.
+ * The TX producer still pads to the next page when necessary (type=0).
  */
 
 /* Capavisor → Domain (RX ring) */
@@ -675,7 +646,7 @@ struct thhv_run_vp {
 #define DOMCOMM_MSG_DOMAIN_EVENT  0x0004  /* Child domain state change */
 #define DOMCOMM_MSG_ERROR         0x0005  /* Error / backpressure signal */
 #define DOMCOMM_MSG_GROW_ACK      0x0006  /* Ring growth acknowledged */
-#define DOMCOMM_MSG_DOORBELL_NOTIFY 0x0007 /* Doorbell write (fast-path, child not stopped) */
+#define DOMCOMM_MSG_DOORBELL_EVENT  0x0008 /* Recipient-scoped port and opaque value */
 
 /* Domain → Capavisor (TX ring) */
 #define DOMCOMM_MSG_ATTEST_REQ    0x0100  /* Request (self-)attestation */
@@ -768,10 +739,22 @@ struct domcomm_pa_map_entry {
 	__u64 size;                   /* Range size in bytes */
 };  /* 24 bytes */
 
+struct domcomm_doorbell_entry {
+	__u64 recipient;
+	__u64 port;
+	__u64 handle;
+	__u64 vp;
+	__u8 vector;
+	__u8 kind;
+	__u8 reserved[6];
+};  /* 40 bytes */
+
+#define DOMCOMM_ATTEST_F_DOORBELLS (1U << 2)
+
 /*
  * Binary attestation report header (common base).
  *
- * Followed by three arrays packed contiguously: mem_caps[], dom_caps[], pa_map[].
+ * Followed by packed arrays: mem_caps[], dom_caps[], pa_map[], doorbells[].
  * When `flags & DOMCOMM_ATTEST_F_SEALED`, a `domcomm_signed_envelope` (plus
  * optional TPM blobs) follows the cap entries — see THHV_ATTEST_SELF docs.
  *
@@ -779,13 +762,14 @@ struct domcomm_pa_map_entry {
  *                        + nr_mem_caps   * sizeof(domcomm_mem_cap_entry)
  *                        + nr_dom_caps   * sizeof(domcomm_dom_cap_entry)
  *                        + nr_pa_entries * sizeof(domcomm_pa_map_entry)
+ *                        + nr_doorbells * sizeof(domcomm_doorbell_entry)
  *
  * If the total exceeds DOMCOMM_MAX_PAYLOAD (4080 bytes), the report
  * is split across multiple DOMCOMM_MSG_ATTEST messages.
  *
  * NOTE: `chunk_index` / `total_chunks` are currently dead — the capavisor
- * hardcodes (0, 1) and the kernel does not reassemble multi-chunk reports.
- * Today's reports must fit in a single 4080-byte message.
+ * hardcodes (0, 1). The driver reassembles chunks using the hypercall's
+ * total-size and byte-offset results, not these two fields.
  */
 struct domcomm_attest_report {
 	__u64 domain_id;
@@ -797,11 +781,12 @@ struct domcomm_attest_report {
 	__u32 nr_pa_entries;
 	__u16 chunk_index;            /* 0-based (0 if single message) */
 	__u16 total_chunks;           /* 1 if entire report fits in one msg */
-	__u32 reserved;
+	__u32 nr_doorbells;           /* flag DOORBELLS */
 	/* Followed by packed arrays (when chunk_index == 0 or reassembled):
 	 *   struct domcomm_mem_cap_entry  mem_caps[nr_mem_caps];
 	 *   struct domcomm_dom_cap_entry  dom_caps[nr_dom_caps];
 	 *   struct domcomm_pa_map_entry   pa_map[nr_pa_entries];
+	 *   struct domcomm_doorbell_entry doorbells[nr_doorbells];
 	 */
 };
 
@@ -847,17 +832,44 @@ struct domcomm_enum_cap_req {
 	__u64 handle;                 /* Handle to enumerate */
 };
 
-/* DOMCOMM_MSG_DOORBELL_NOTIFY payload (RX ring, capavisor → domain).
- * Sent when an EPT violation matches a registered doorbell.  The child VP
- * is NOT stopped; it has already resumed.
+struct domcomm_doorbell_event {
+	__u64 port;
+	__u64 value;
+};
+
+/*
+ * Device-fd receive endpoints: the driver supplies its all-CPU vector.
+ * The endpoint is revoked when this device fd closes, even after SEND.
+ * kind/vp are immutable; vp must be zero for Sync.
  */
-struct domcomm_doorbell_notify {
-	__u32 doorbell_id;   /* matches thhv_ioeventfd_entry.doorbell_id */
+struct thhv_create_doorbell {
+	__u64 kind;
+	__u64 vp; /* Linux logical CPU for Async; translated to the native VP ID */
+	__u64 handle; /* out: invocation capability, transferable with SEND_CAP */
+	__u64 port;   /* out: recipient-local tree subhandle */
+	__u64 recipient; /* out: recipient domain identity */
+};
+
+/* Subscription only; fd == -1 detaches without destroying the endpoint. */
+struct thhv_doorbell_eventfd {
+	__u64 port;
+	__s32 fd;
 	__u32 reserved;
-	__u64 gpa;           /* guest physical address that was written */
-	__u64 value;         /* data written by the guest */
-	__u32 size;          /* write size in bytes */
-	__u32 reserved2;
+};
+
+struct thhv_notify {
+	__u64 handle;
+	__u64 value;
+};
+
+struct thhv_revoke_cap {
+	__u64 parent;
+	__u64 sub;
+};
+
+struct thhv_send_cap {
+	__u64 handle;
+	__u64 attrs;
 };
 
 struct thhv_irqfd {
@@ -870,18 +882,6 @@ struct thhv_irqfd {
 };
 
 #define THHV_IRQFD_FLAG_DEASSIGN  (1u << 0)
-
-struct thhv_ioeventfd {
-	__s32 fd;
-	__u32 flags;
-	__u64 addr;
-	__u32 len;
-	__u32 datamatch;
-};
-
-#define THHV_IOEVENTFD_FLAG_DATAMATCH  (1u << 0)  /* filter on datamatch value */
-#define THHV_IOEVENTFD_FLAG_PIO        (1u << 1)  /* port I/O (not MMIO) */
-#define THHV_IOEVENTFD_FLAG_DEASSIGN   (1u << 2)  /* remove existing registration */
 
 struct thhv_msi_routing {
 	__u32 nr;
@@ -991,7 +991,7 @@ struct thhv_attest_self {
  * when the report is sealed.  Matches `themis_abi::domcomm::SignedEnvelope`.
  *
  * The envelope is located at byte offset
- *   40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24
+ *   40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24 + nr_doorbells*40
  * in `report_buf` (i.e. immediately after the common-base entries).
  */
 struct domcomm_signed_envelope {
@@ -1023,6 +1023,15 @@ struct thhv_read_pcr {
 #define THHV_READ_PCR \
 	_IOWR(THHV_IOCTL_MAGIC, 0x06, struct thhv_read_pcr)
 
+#define THHV_CREATE_DOORBELL \
+	_IOWR(THHV_IOCTL_MAGIC, 0x07, struct thhv_create_doorbell)
+#define THHV_DOORBELL_EVENTFD \
+	_IOW(THHV_IOCTL_MAGIC, 0x08, struct thhv_doorbell_eventfd)
+#define THHV_NOTIFY \
+	_IOW(THHV_IOCTL_MAGIC, 0x09, struct thhv_notify)
+#define THHV_REVOKE_CAP \
+	_IOW(THHV_IOCTL_MAGIC, 0x0a, struct thhv_revoke_cap)
+
 /* Inject a virtual interrupt into a child VP's PIR (Pending Interrupt Request).
  * If the VP is halted (guest executed HLT), it is woken to process the vector. */
 struct thhv_inject_interrupt {
@@ -1041,8 +1050,7 @@ struct thhv_inject_interrupt {
 	_IOW(THHV_IOCTL_MAGIC, 0x12, struct thhv_set_guest_memory)
 #define THHV_IRQFD \
 	_IOW(THHV_IOCTL_MAGIC, 0x13, struct thhv_irqfd)
-#define THHV_IOEVENTFD \
-	_IOW(THHV_IOCTL_MAGIC, 0x14, struct thhv_ioeventfd)
+/* 0x14 retired: device address matching belongs to the VMM. */
 #define THHV_SET_MSI_ROUTING \
 	_IOW(THHV_IOCTL_MAGIC, 0x15, struct thhv_msi_routing)
 #define THHV_GET_GPAP_ACCESS_BITMAP \
@@ -1051,10 +1059,12 @@ struct thhv_inject_interrupt {
 	_IOW(THHV_IOCTL_MAGIC, 0x17, struct thhv_initialize_partition)
 /*
  * Unified policy-setting ioctl — maps directly to THEMIS_OP_SET_POLICY.
- * kind: THEMIS_POLICY_* discriminant.
+ * kind: THEMIS_POLICY_* in bits 31:0; bits 63:32 are zero for domain
+ * defaults, or VP index + 1 for an execution-policy override.
  * key:  vector (interrupt variants) or exit_reason (exit variants), 0 otherwise.
  * sub_key: word_index for register bitmap variants, 0 otherwise.
  * value: the policy value to set.
+ * A VP-scoped category default with value ~0ULL restores inheritance.
  */
 struct thhv_set_policy {
 	__u64 kind;
@@ -1067,6 +1077,8 @@ struct thhv_set_policy {
 	_IOW(THHV_IOCTL_MAGIC, 0x19, struct thhv_inject_interrupt)
 #define THHV_SET_POLICY \
 	_IOW(THHV_IOCTL_MAGIC, 0x1a, struct thhv_set_policy)
+#define THHV_SEND_CAP \
+	_IOW(THHV_IOCTL_MAGIC, 0x1b, struct thhv_send_cap)
 
 /* ── VP-level ioctls ───────────────────────────────────────────────────────── */
 
@@ -1087,6 +1099,7 @@ struct thhv_set_policy {
 #define THHV_TEST_CMD_GROW_RX    1   /* Grow RX ring by arg pages */
 #define THHV_TEST_CMD_GROW_TX    2   /* Grow TX ring by arg pages */
 #define THHV_TEST_CMD_TX_PING    3   /* TX enqueue + notify (echo test) */
+#define THHV_TEST_CMD_DOORBELL_IRQ 4 /* Async notification to CPU arg */
 
 struct thhv_test_cmd {
 	__u32 command;    /* THHV_TEST_CMD_* */

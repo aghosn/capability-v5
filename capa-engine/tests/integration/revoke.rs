@@ -318,20 +318,16 @@ fn test_multi_level_revoke_exact_updates() {
     let (child2_h_in_dom5, _, _) =
         Capability::carve(&platform, &dom5, child1_h_in_dom5, c2_access).unwrap();
 
-    // Create dom10 via root, register in dom5's domain table, send child2 to dom10
+    // Create dom10 under dom5 so SEND uses actual child authority.
     let dom10_h =
-        Capability::create(&platform, &root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+        Capability::create(&platform, &dom5, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
             .unwrap().0;
-    let dom10 = root.read().data.domain_capabilities[&dom10_h]
+    let dom10 = dom5.read().data.domain_capabilities[&dom10_h]
         .upgrade()
         .unwrap();
     let dom10_id = dom10.read().data.id;
 
-    let dom10_h_in_dom5: LocalHandle = 1;
-    dom5.write()
-        .data
-        .add_domain_capability(dom10_h_in_dom5, Arc::downgrade(&dom10));
-    Capability::send(&platform, &dom5, child2_h_in_dom5, dom10_h_in_dom5, Attributes::NONE).unwrap();
+    Capability::send(&platform, &dom5, child2_h_in_dom5, dom10_h, Attributes::NONE).unwrap();
 
     // Revoke child1 from root — cascades to child2
     let revoke_updates = Capability::revoke(&platform, &root, r0_h, child1_sub).unwrap();
@@ -400,17 +396,14 @@ fn test_revoke_mixed_carved_and_alias_subtree() {
         Capability::carve(&platform, &dom5, child1_h_in_dom5, c2_access).unwrap();
 
     let dom_carved_recv_h =
-        Capability::create(&platform, &root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+        Capability::create(&platform, &dom5, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
             .unwrap().0;
-    let dom_carved_recv = root.read().data.domain_capabilities[&dom_carved_recv_h]
+    let dom_carved_recv = dom5.read().data.domain_capabilities[&dom_carved_recv_h]
         .upgrade()
         .unwrap();
     let dom_carved_recv_id = dom_carved_recv.read().data.id;
 
-    dom5.write()
-        .data
-        .add_domain_capability(1, Arc::downgrade(&dom_carved_recv));
-    Capability::send(&platform, &dom5, child2_h_in_dom5, 1, Attributes::NONE).unwrap();
+    Capability::send(&platform, &dom5, child2_h_in_dom5, dom_carved_recv_h, Attributes::NONE).unwrap();
 
     // dom5 aliases alias1 [0x4000, 0x1000) R from child1 and sends to dom_alias_recv
     // alias1 does NOT overlap with the carved child2 [0x2000, 0x4000)
@@ -419,17 +412,14 @@ fn test_revoke_mixed_carved_and_alias_subtree() {
         Capability::alias(&platform, &dom5, child1_h_in_dom5, alias_access).unwrap();
 
     let dom_alias_recv_h =
-        Capability::create(&platform, &root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+        Capability::create(&platform, &dom5, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
             .unwrap().0;
-    let dom_alias_recv = root.read().data.domain_capabilities[&dom_alias_recv_h]
+    let dom_alias_recv = dom5.read().data.domain_capabilities[&dom_alias_recv_h]
         .upgrade()
         .unwrap();
     let dom_alias_recv_id = dom_alias_recv.read().data.id;
 
-    dom5.write()
-        .data
-        .add_domain_capability(2, Arc::downgrade(&dom_alias_recv));
-    Capability::send(&platform, &dom5, alias1_h_in_dom5, 2, Attributes::NONE).unwrap();
+    Capability::send(&platform, &dom5, alias1_h_in_dom5, dom_alias_recv_h, Attributes::NONE).unwrap();
 
     // Revoke child1 — alias branch generates no ChangeRights updates
     let revoke_updates = Capability::revoke(&platform, &root, r0_h, child1_sub).unwrap();

@@ -20,9 +20,10 @@ use crate::serial_println;
 ///
 /// ```text
 /// [ AttestReport (40B)       ]   ← flags |= SEALED on signed path
-/// [ MemCapEntry × nr_mem_caps]   \
-/// [ DomCapEntry × nr_dom_caps]    > "common base" — present on both paths
-/// [ PaMapEntry  × nr_pa_ents ]   /
+/// [ MemCapEntry × nr_mem_caps]
+/// [ DomCapEntry × nr_dom_caps]
+/// [ PaMapEntry  × nr_pa_ents ]
+/// [ DoorbellEntry × nr_doorbells ]   ← common base ends here
 /// ─────────── signed-only tail ───────────
 /// [ SignedEnvelope (168B)    ]   ← only when arg0 == 1
 /// [ tpm_quote (variable)     ]   ← only when TPM is available
@@ -37,11 +38,13 @@ use crate::serial_println;
 /// arg0 == 0  →  Unsigned domain config. Used by `thhv` at module init
 ///                (`thhv_pa_map_init_from_attestation`) to learn its
 ///                memory capability handles.
-/// arg0 == 1  →  Signed report; reads `AttestRequest {nonce, user_pub_key}`
+/// arg0 == 1  →  Signed report; at offset zero reads `AttestRequest {nonce, user_pub_key}`
 ///                from the TX ring and appends the signed envelope tail.
 ///                arg2 = expected TX ring message sequence (defense in depth).
 /// arg1 = byte offset into the serialised payload; capavisor enqueues the
 ///        slice `payload[offset..]` (capped at the single-page message limit).
+///        Offset zero replaces the cached snapshot; continuations read that
+///        same snapshot without consuming another TX request.
 ///
 /// IN:  RDI = mode (0=unsigned, 1=signed), RSI = byte offset, RDX = tx_sequence (if signed)
 /// OUT: Report delivered to caller's DomainComm RX ring.
@@ -60,47 +63,39 @@ pub(super) fn do_attest_self(
     let is_signed = arg0 == 1;
     let offset = arg1 as usize;
 
-    // Common base: AttestReport header + MemCap/DomCap/PaMap arrays.
-    // Same wire format for both paths; dom0's thhv parses this verbatim at
-    // boot — see thhv/src/thhv_translate.c::thhv_pa_map_init_from_attestation.
-    //
-    // Capability::attest_self_structured is the engine's own mediated
-    // wrapper (execute()-protected, sealed + MonitorAPI::ATTEST-gated) around
-    // build_structured_attestation, which walks the caller's memory/domain
-    // capability maps and upgrades each weak ref -- doing that under the
-    // engine's op lock keeps a concurrent revoke of one of those capabilities
-    // from producing an inconsistent, non-atomic snapshot.
-    let result = Capability::attest_self_structured(platform, caller);
-    let mut attest = match result {
-        Ok((a, _batch)) => a,
-        Err(e) => return e.into(),
-    };
-    if is_signed {
-        attest.flags |= domcomm::DOMCOMM_ATTEST_F_SEALED;
-    }
-    let domain_id = attest.domain_id;
-    let mut payload = attest.to_bytes();
-
-    // Locate the caller's domain and verify DomainComm is ready before doing
-    // any TX-ring reads (signed path) or RX-ring writes.
-    // Invariant: caller's own domain MUST be in the platform map — capa-engine
-    // and platform-side registry can't be out of sync for a live caller.
-    let pd_arc = platform
-        .domain_arc(domain_id)
-        .expect("[attest] caller's PlatformDomain missing (capa/platform desync)");
-    let mut pd = pd_arc.lock();
-    if pd.domcomm.is_none() {
-        return HypercallResult::success_2(0, 0);
-    }
-
-    if is_signed {
-        match build_signed_tail(&payload, &mut pd, arg2) {
-            Ok(tail) => payload.extend_from_slice(&tail),
-            Err(e) => return e,
+    let result = Capability::with_self_attestation(platform, caller, offset == 0, |domain_id, report| {
+        let pd_arc = platform
+            .domain_arc(domain_id)
+            .expect("[attest] caller's PlatformDomain missing (capa/platform desync)");
+        let mut pd = pd_arc.lock();
+        if pd.domcomm.is_none() {
+            return Ok(HypercallResult::success_2(0, 0));
         }
-    }
 
-    enqueue_attest_payload(&mut pd, &payload, offset)
+        if let Some(mut attest) = report {
+            if is_signed {
+                attest.flags |= domcomm::DOMCOMM_ATTEST_F_SEALED;
+            }
+            let mut payload = attest.to_bytes();
+            if is_signed {
+                match build_signed_tail(&payload, &mut pd, arg2) {
+                    Ok(tail) => payload.extend_from_slice(&tail),
+                    Err(e) => return Ok(e),
+                }
+            }
+            pd.attest_payload = Some(payload);
+        }
+        let Some(payload) = pd.attest_payload.take() else {
+            return Ok(HypercallResult::error(errors::ERR_BADSTATE));
+        };
+        let result = enqueue_attest_payload(&mut pd, &payload, offset);
+        pd.attest_payload = Some(payload);
+        Ok(result)
+    });
+    match result {
+        Ok(reply) => reply,
+        Err(error) => error.into(),
+    }
 }
 
 /// Read the verifier's `AttestRequest` from the caller's TX ring.
@@ -259,11 +254,9 @@ fn build_signed_tail(
 ///
 /// Returns `RDI = total_size`, `RSI = payload bytes written this call`.
 /// Values are in **payload bytes** (the ring's MsgHeaders and 8-byte
-/// alignment padding are not exposed). When `offset == 0` and the full
-/// payload was enqueued, `wrote == total_size`.
+/// alignment padding are not exposed). At most one message is enqueued.
 ///
-/// On ring-full, we return `ERR_BUSY` and roll back nothing (already-pushed
-/// chunks remain in the ring; the caller is expected to drain them).
+/// On ring-full, return `ERR_BUSY` without publishing a partial response.
 fn enqueue_attest_payload(
     pd: &mut crate::platform::PlatformDomain,
     payload: &[u8],
@@ -276,17 +269,9 @@ fn enqueue_attest_payload(
         return HypercallResult::success_2(total_size as u64, 0);
     }
 
-    let mut written = 0usize;
-    let mut cur = offset;
-    while cur < total_size {
-        let chunk_len = (total_size - cur).min(domcomm::MAX_PAYLOAD);
-        let slice = &payload[cur..cur + chunk_len];
-        let ring_bytes = pd.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, slice);
-        if ring_bytes == 0 {
-            return HypercallResult::error(errors::ERR_BUSY);
-        }
-        cur += chunk_len;
-        written += chunk_len;
+    let written = (total_size - offset).min(domcomm::MAX_PAYLOAD);
+    if pd.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, &payload[offset..offset + written]) == 0 {
+        return HypercallResult::error(errors::ERR_BUSY);
     }
 
     HypercallResult::success_2(total_size as u64, written as u64)

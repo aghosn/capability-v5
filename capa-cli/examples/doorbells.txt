@@ -1,0 +1,37 @@
+# Generic capability operations use domain-local handles.
+# Root memory occupies handle 1; creating middle gives root handle 2.
+init root 0x200000
+create-domain root middle 0b1111 ALL
+seal middle
+create-domain middle leaf 0b1111 ALL
+
+# These are recipient-tree ports 2 and 3, not sender addresses.
+create-doorbell root self 0x91 sync
+send-capability root 3 middle
+accept middle 0
+send-capability middle 2 leaf
+create-doorbell root self 0x92 async 3
+send-capability root 3 middle
+accept middle 1
+send-capability middle 2 leaf
+seal leaf
+doorbells root
+doorbells leaf
+
+# Sync reaches root VP 0 through middle VP 1, from leaf VP 2.
+switch middle 0 1
+switch leaf 0 2
+notify leaf 0 1 42
+doorbells root
+list
+
+# Reclaim destroys leaf's Sync capability, not a transfer back.
+revoke root self 2
+doorbells leaf
+# Existing interrupt-resume code follows middle back down to leaf.
+switch middle 0 1
+# EXPECT_FAIL
+notify leaf 0 1 99
+notify leaf 0 2 17
+doorbells root
+list

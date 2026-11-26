@@ -126,7 +126,9 @@ impl ActiveVcpuExt for ActiveVcpu {
         let if_set = self.get(vmcs::guest::RFLAGS) & RFLAGS_IF != 0;
         let blocking =
             self.get(vmcs::guest::INTERRUPTIBILITY_STATE) & INTERRUPTIBILITY_STI_MOV_SS != 0;
-        if_set && !blocking
+        let event_pending =
+            self.get(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD) & VMENTRY_INTR_INFO_VALID != 0;
+        if_set && !blocking && !event_pending
     }
 
     #[inline]

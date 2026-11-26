@@ -324,11 +324,53 @@ Domain {
     id:                  u64         — globally unique, auto-incremented
     status:              DomainStatus (Unsealed | Sealed | Revoked)
     policy:              DomainPolicy
+    doorbell_capabilities: map(LocalHandle → Doorbell capability)
     memory_capabilities: map(LocalHandle → MemoryRegion capability)
     domain_capabilities: map(LocalHandle → Domain capability)
     pending_capabilities: map(u64 → PendingCapability)
 }
 ```
+
+---
+
+## Doorbell Capabilities
+
+[`capa-engine/src/doorbell.rs`](../../capa-engine/src/doorbell.rs) defines
+immutable notification authority:
+
+```text
+Doorbell { recipient, port_id, vector, kind: Sync | Async { vp_id } }
+```
+
+Each doorbell is a child of its recipient's domain capability, independent
+of channel capabilities. Creation names self or an owned unsealed child.
+The recipient port is stable; the holder-local capability handle is the
+authority to invoke it. SEND, ACCEPT, REJECT and REVOKE use the same monitor
+entry points as other capabilities, with type dispatch inside the engine.
+Reclaim destroys a doorbell rather than returning invocation authority.
+Revocation does not retract already published events.
+
+`NOTIFY(handle, value)` requires effective Deliver and injectable permissions.
+Visibility is VP-specific; injection authority always comes from the current
+domain policy, not a copied VP override.
+Sync finds the blocked recipient VP in the live caller chain, even for a
+farther ancestor, and reuses interrupt unwind/resumption. A recipient outside
+that chain is an error. Sync stores no VP. Async stores its target VP, posts
+an interrupt without returning the sender's CPU, and promises no scheduling.
+Validation and queue-capacity checks precede publication and handoff;
+notify/revoke are serialized by the engine.
+
+Ordinary device address/data matching belongs in the VMM, not this object.
+Linux eventfd subscriptions are mutable driver state, separate from authority.
+Attestation inventories recipient-tree doorbells and held invocation handles;
+tree-only entries have handle `u64::MAX`. A frozen pending-transfer handle is
+not reported as held invocation authority. Entries contain recipient, port,
+handle, vector and kind/target VP, never eventfd identities or device keys.
+The signed common base covers every entry. Continuation chunks retain the
+same report snapshot.
+
+See [DomainComm's attestation format](../domain-comm.md#domcomm_msg_attest--binary-attestation-report)
+for the 40-byte encoding and signature coverage.
 
 ---
 

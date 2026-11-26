@@ -28,16 +28,17 @@ pub mod opcodes {
     /// OUT: RDI = new_handle, RSI = sub_handle
     pub const THEMIS_ALIAS: u64 = 0x02;
 
-    /// Send a memory capability to a receiver domain.
-    /// IN:  RDI = cap_handle, RSI = receiver_domain_handle, RDX = attributes
+    /// Send a capability to a receiver domain or channel.
+    /// IN: RDI = cap_handle, RSI = receiver_handle, RDX = attributes.
+    /// RCX = memory GPA hint (u64::MAX = none; required for endpoints).
     pub const THEMIS_SEND: u64 = 0x03;
 
-    /// Accept a pending memory capability.
+    /// Accept a pending capability, independent of its type.
     /// IN:  RDI = pending_id
     /// OUT: RDI = new_handle
     pub const THEMIS_ACCEPT: u64 = 0x04;
 
-    /// Reject a pending memory capability.
+    /// Reject a pending capability, independent of its type.
     /// IN:  RDI = pending_id
     pub const THEMIS_REJECT: u64 = 0x05;
 
@@ -50,13 +51,12 @@ pub mod opcodes {
     /// IN:  RDI = domain_handle
     pub const THEMIS_SEAL: u64 = 0x07;
 
-    /// Revoke a child of a memory capability.
-    /// IN:  RDI = parent_handle, RSI = child_sub_handle
-    pub const THEMIS_REVOKE_MEM: u64 = 0x08;
+    /// Revoke a tree child. RDI = parent_handle (u64::MAX = self domain),
+    /// RSI = child_sub_handle. RSI = 0 revokes the owned child domain
+    /// named by RDI directly; this does not destroy a held endpoint.
+    pub const THEMIS_REVOKE: u64 = 0x08;
 
-    /// Revoke an entire child domain.
-    /// IN:  RDI = child_domain_handle
-    pub const THEMIS_REVOKE_DOMAIN: u64 = 0x09;
+    // 0x09 retired: child-domain destruction uses REVOKE(handle, 0).
 
     /// Switch to a target domain's VP (or return to caller).
     /// IN:  RDI = target_domain_handle (0 = return), RSI = target_vp_id
@@ -93,34 +93,31 @@ pub mod opcodes {
     /// IN:  RDI = pci_bdf
     pub const THEMIS_RELEASE_DEVICE: u64 = 0x1a;
 
-    /// Enumerate pending capabilities / domain tree.
+    /// Find a pending offer, independent of type.
+    /// IN: RDI = inclusive starting pending ID (0 for first).
+    /// OUT: RDI = pending ID, RSI = found (0 or 1).
+    /// Continue with the previous returned ID + 1.
     pub const THEMIS_ENUMERATE: u64 = 0x13;
 
     /// Add a virtual processor to a child domain.
     /// IN:  RDI = child_domain_handle, RSI = comm_cap_handle, RDX = vp_index
     pub const THEMIS_ADD_VP: u64 = 0x14;
 
-    /// IN:  RDI = child_domain_handle, RSI = gpa, RDX = size (bytes), RCX = datamatch, R8 = flags
-    /// OUT: RDI = doorbell_id
-    pub const THEMIS_REGISTER_DOORBELL: u64 = 0x15;
-
-    /// Unregister a previously registered doorbell entry.
-    /// IN:  RDI = child_domain_handle, RSI = doorbell_id
-    pub const THEMIS_UNREGISTER_DOORBELL: u64 = 0x16;
-
-    /// Configure the capavisor's notify_vector for DomainComm doorbell IPIs.
-    /// IN:  RDI = vector (1–255)
-    pub const THEMIS_SET_THEMIC_VECTOR: u64 = 0x17;
+    // 0x15–0x17 retired: address registration and global notification vector.
 
     /// Register a COMM page owned by the caller, bound to a child VP.
     /// IN:  RDI = mem_cap_handle, RSI = child_domain_handle, RDX = vp_id
     ///
-    /// Used only for per-VP COMM pages (VpCommPage).  For per-domain
-    /// DomainComm pages, use SEND with the COMM attribute instead.
+    /// SELF_CAPABILITY + vp_id=u32::MAX registers the caller's own DomainComm
+    /// backing. Initial child DomainComm pages use SEND with COMM instead.
     pub const THEMIS_REGISTER_COMM: u64 = 0x18;
 
     /// Notify the capavisor to process the caller's DomainComm TX ring.
     /// IN:  (no arguments)
+    /// A GROW request completes synchronously: RDI = new backing page count,
+    /// RSI = new power-of-two byte capacity. Failure does not adopt its pages.
+    /// The caller prepares local mappings and serializes all ring access across
+    /// this exchange. Requires CPUID DOMCOMM_SYNC_GROW.
     pub const THEMIS_DOMCOMM_NOTIFY: u64 = 0x19;
 
     /// Inject a virtual interrupt into a VP of a child domain.
@@ -148,37 +145,35 @@ pub mod opcodes {
     /// OUT: RAX = error code (0 on success)
     pub const THEMIS_MAP_SELF: u64 = 0x1f;
 
-    /// Send a channel capability to a receiver domain.
-    /// IN:  RDI = channel_handle, RSI = receiver_domain_handle, RDX = attributes
-    pub const THEMIS_SEND_CHAN: u64 = 0x20;
-
-    /// Accept a pending channel capability.
-    /// IN:  RDI = pending_id
-    /// OUT: RDI = new_handle
-    pub const THEMIS_ACCEPT_CHAN: u64 = 0x21;
+    // 0x20/0x21 retired: endpoint ownership uses SEND/ACCEPT.
 
     /// Unified policy-setting hypercall — maps directly to
     /// `Capability::set_policy(&caller, child_handle, PolicyIdentifier, value)`.
     ///
     /// IN:  RDI = child_domain_handle
-    ///      RSI = policy_kind (see `policy_kind::*` constants)
+    ///      RSI = policy selector (kind plus optional VP index; see `policy_kind`)
     ///      RDX = key (vector for interrupt variants, exit_reason for exit variants, 0 otherwise)
     ///      RCX = sub_key (word_index for register bitmap variants, 0 otherwise)
     ///      R8  = value
     pub const THEMIS_SET_POLICY: u64 = 0x22;
 
-    /// Ring a doorbell from inside the guest (child domain).
-    /// IN:  RDI = doorbell GPA, RSI = value
-    pub const THEMIS_RING_DOORBELL: u64 = 0x23;
+    // 0x23 retired: address-matching doorbell invocation.
+
+    /// Create an immutable doorbell for self or an owned unsealed child.
+    /// IN: RDI = child handle (u64::MAX = self), RSI = vector,
+    /// RDX = kind (0 = Sync, 1 = Async), RCX = VP (0 for Sync).
+    /// OUT: RDI = holder-local capability handle, RSI = recipient-tree port.
+    pub const THEMIS_CREATE_DOORBELL: u64 = 0x24;
+
+    /// Notify through a held doorbell capability.
+    /// IN: RDI = capability handle, RSI = opaque value.
+    /// Sync also returns the donated CPU through interrupt unwind.
+    pub const THEMIS_NOTIFY: u64 = 0x25;
 }
 
 /// Synthetic exit reasons (high bit set to distinguish from VMX hardware exits).
 pub mod synthetic_exits {
-    /// Child rang a doorbell via RING_DOORBELL VMCALL.
-    /// The capavisor enqueued a DOORBELL_NOTIFY on the parent's DomainComm RX
-    /// ring and switched back to the parent.  thhv should drain the RX ring
-    /// and signal matching ioeventfds.
-    pub const THEMIS_EXIT_DOORBELL: u32 = 0x8000_0001;
+    // 0x8000_0001 is reserved (retired address-matched doorbell exit).
 
     /// Parent's callee (a descendant domain) was revoked.  The capavisor
     /// walked the caller chain, found this domain as the first non-revoked
@@ -187,6 +182,9 @@ pub mod synthetic_exits {
     /// callee is gone; the callee handle in its capability tree is also
     /// no longer valid.
     pub const THEMIS_EXIT_CALLEE_REVOKED: u32 = 0x8000_0002;
+
+    /// Child voluntarily returned its donated CPU via SWITCH(0).
+    pub const THEMIS_EXIT_YIELD: u32 = 0x8000_0003;
 }
 
 /// Maximum number of VPs that may be created in a single Themis domain.
@@ -226,6 +224,98 @@ pub mod policy_kind {
     /// Per-vector explicit-injection permission (`THEMIS_INJECT_INTERRUPT`),
     /// independent of `VECTOR_VISIBILITY`. See `VectorPolicy::injectable`.
     pub const VECTOR_INJECTABLE: u64 = 16;
+    pub const DEFAULT_INTR_REG_READ_SET: u64 = 17;
+    pub const DEFAULT_INTR_REG_WRITE_SET: u64 = 18;
+    pub const DEFAULT_EXIT_REG_READ_SET: u64 = 19;
+    pub const DEFAULT_EXIT_REG_WRITE_SET: u64 = 20;
+    pub const DEFAULT_VECTOR_INJECTABLE: u64 = 21;
+    /// Emulate inclusive ranges: key=start, sub_key=end, value=packed result word.
+    /// CPUID endpoints pack `(leaf << 32) | subleaf`; MSR endpoints are u32.
+    /// Selector bit 16 selects result word 0/1, independently of VP scope.
+    pub const CPUID_EMULATE_RANGE: u64 = 22;
+    pub const MSR_EMULATE_RANGE: u64 = 23;
+    const EMULATE_WORD_BIT: u64 = 1 << 16;
+
+    /// On a VP-scoped category default, restore domain-default inheritance.
+    pub const INHERIT: u64 = u64::MAX;
+
+    /// The low word selects the existing policy kind. The high word is zero
+    /// for domain defaults, or VP index + 1. Capability handles stay full-width.
+    pub fn for_vp(kind: u64, vp_index: u32) -> Option<u64> {
+        let (_, vp, _) = decode(kind)?;
+        if vp.is_some() || vp_index >= super::MAX_VPS_PER_DOMAIN {
+            return None;
+        }
+        Some(kind | ((u64::from(vp_index) + 1) << 32))
+    }
+
+    pub fn with_emulate_word(selector: u64, word: u8) -> Option<u64> {
+        let (kind, _, _) = decode(selector)?;
+        if !matches!(kind, CPUID_EMULATE_RANGE | MSR_EMULATE_RANGE) || word > 1 {
+            return None;
+        }
+        Some((selector & !EMULATE_WORD_BIT) | (u64::from(word) << 16))
+    }
+
+    pub fn decode(selector: u64) -> Option<(u64, Option<u32>, u8)> {
+        let kind = selector & u64::from(u32::MAX) & !EMULATE_WORD_BIT;
+        let word = u8::from(selector & EMULATE_WORD_BIT != 0);
+        let vp = selector >> 32;
+        if kind > MSR_EMULATE_RANGE
+            || vp > u64::from(super::MAX_VPS_PER_DOMAIN)
+            || (word != 0 && !matches!(kind, CPUID_EMULATE_RANGE | MSR_EMULATE_RANGE))
+        {
+            return None;
+        }
+        Some((
+            kind,
+            if vp == 0 { None } else { Some((vp - 1) as u32) },
+            word,
+        ))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn policy_selection_preserves_kind_and_optional_vp() {
+            for kind in 0..=MSR_EMULATE_RANGE {
+                assert_eq!(decode(kind), Some((kind, None, 0)));
+                for vp in [0, super::super::MAX_VPS_PER_DOMAIN - 1] {
+                    assert_eq!(decode(for_vp(kind, vp).unwrap()), Some((kind, Some(vp), 0)));
+                }
+            }
+            assert_eq!(for_vp(MSR_EMULATE_RANGE + 1, 0), None);
+            assert_eq!(
+                for_vp(CPUID_EMULATE, super::super::MAX_VPS_PER_DOMAIN),
+                None
+            );
+            assert_eq!(decode(u64::MAX), None);
+            assert_eq!(decode((257 << 32) | CPUID_DEFAULT), None);
+        }
+
+        #[test]
+        fn emulate_word_and_vp_selection_are_independent_and_strict() {
+            for kind in [CPUID_EMULATE_RANGE, MSR_EMULATE_RANGE] {
+                for word in 0..2 {
+                    let selector = with_emulate_word(kind, word).unwrap();
+                    assert_eq!(decode(selector), Some((kind, None, word)));
+                    let scoped = for_vp(selector, 255).unwrap();
+                    assert_eq!(decode(scoped), Some((kind, Some(255), word)));
+                    assert_eq!(
+                        with_emulate_word(for_vp(kind, 255).unwrap(), word),
+                        Some(scoped)
+                    );
+                }
+                assert_eq!(with_emulate_word(kind, 2), None);
+                assert_eq!(decode(kind | (1 << 17)), None);
+            }
+            assert_eq!(with_emulate_word(CPUID_EMULATE, 1), None);
+            assert_eq!(decode(CPUID_EMULATE | EMULATE_WORD_BIT), None);
+            assert_eq!(for_vp(for_vp(CPUID_EMULATE_RANGE, 0).unwrap(), 1), None);
+        }
+    }
 }
 
 // ── REGISTER_COMM vp_id sentinel ──────────────────────────────────────────── //
@@ -258,6 +348,8 @@ pub mod vmx_exit_reasons;
 
 pub mod domcomm;
 
+pub mod pv;
+
 // ── Themis hypervisor CPUID discovery ──────────────────────────────────────── //
 //
 // These constants define the CPUID leaf layout for discovering the Themis
@@ -284,11 +376,7 @@ pub mod cpuid {
         /// that want to assert it.
         pub const FEATURE_SYNC_SWITCH: u32 = 1 << 0;
 
-        /// Guest may issue the `THEMIS_RING_DOORBELL` VMCALL (opcode
-        /// 0x23) to notify the parent through a registered doorbell,
-        /// bypassing the MMIO emulation path.  See
-        /// `docs/architecture/confidential-vm.md` §12.
-        pub const FEATURE_DOORBELL_HYPERCALL: u32 = 1 << 1;
+        // Bit 1 is reserved (retired address-matched doorbell VMCALL).
 
         /// Capavisor advertises hardware x2APIC virtualization support
         /// to children — VIRTUALIZE_X2APIC_MODE (bit 4), APIC_REGISTER_VIRT
@@ -300,11 +388,19 @@ pub mod cpuid {
         /// switch to x2APIC ops while hardware delivers no virtualization,
         /// causing `#GP` on RDMSR of any x2APIC register.
         pub const FEATURE_X2APIC_VIRT: u32 = 1 << 2;
+
+        /// Immutable doorbell capabilities with CREATE_DOORBELL (0x24)
+        /// and NOTIFY (0x25), using ordinary capability ownership operations.
+        pub const FEATURE_CAPABILITY_DOORBELLS: u32 = 1 << 3;
     }
 
     /// DomainComm discovery (alias for domcomm::CPUID_DOMCOMM_LEAF).
     /// EAX:EBX = base GPA (lo:hi), ECX = size in pages.
     pub const LEAF_DOMCOMM: u32 = 0x4000_0002;
+    /// EDX feature bits on DomainComm discovery. Subleaf N+1 locates page N.
+    pub const DOMCOMM_PAGE_LIST: u32 = 1 << 0;
+    /// GROW completion is returned by DOMCOMM_NOTIFY in RDI/RSI (pages/capacity).
+    pub const DOMCOMM_SYNC_GROW: u32 = 1 << 1;
 
     /// Capacity limits.
     /// EAX = max VPs, EBX = max partitions, ECX = max memory regions.
@@ -317,6 +413,11 @@ pub mod cpuid {
     /// ECX = BAR2 GPA low 32 bits (shared data region).
     /// EDX = BAR2 GPA high 32 bits.
     pub const LEAF_IVSHMEM: u32 = 0x4000_0004;
+
+    /// PV descriptor locator: EAX:EBX = GPA low:high, ECX = bytes, EDX = version.
+    pub const LEAF_PV: u32 = 0x4000_0005;
+    /// Native current-VP identity: EAX = VP index, EBX/ECX = 0, EDX = PV version.
+    pub const PV_SUBLEAF_IDENTITY: u32 = 1;
 
     /// Expected signature bytes in EBX:ECX:EDX of LEAF_BASE.
     pub const SIG_EBX: u32 = u32::from_le_bytes(*b"Them");

@@ -1,6 +1,6 @@
 {
   "extends": "standard",
-  "general": { "name": "dom1-standard" },
+  "general": { "name": "dom1-standard", "device_transport": "legacy" },
   "policies": {
     "interrupts": {
       "default": {

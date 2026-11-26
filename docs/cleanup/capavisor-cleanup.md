@@ -174,7 +174,7 @@ Functions exceeding 100 lines in `themis/capavisor/src/`:
   - `decode_io_exit(exit_qual, vcpu)` (~1564-1584): shared IO qualification decoder.
   - `copy_ept_fault_instruction(platform, vcpu, child_arc, msg)` (~1604-1639): MMIO instruction-byte fetch.
   - `swap_child_to_parent_vcpu(platform, vcpu, return_ctx)` (~1657-1727): deactivate child, activate parent, update PID, set return regs, advance parent RIP.
-- **Smells:** This function is the central example of mixed concerns: engine state transition, COMM ABI, VMCS reads, x86 decode, pointer ownership tricks, and quantum-sched injection are interleaved. It also locally redefines `EXIT_REASON_EPT_VIOLATION = 48` and `IO_EXIT_REASON = 30` instead of using `vmexit` constants.
+- **Smells:** This function is the central example of mixed concerns: engine state transition, COMM ABI, VMCS reads, x86 decode, pointer ownership tricks, and interrupt injection are interleaved. It also locally redefines `EXIT_REASON_EPT_VIOLATION = 48` and `IO_EXIT_REASON = 30` instead of using `vmexit` constants.
 
 ### `guest/linux.rs::load_linux` — lines 415-618, 204 lines
 

@@ -130,9 +130,8 @@ ambient real-hardware routing decision. Once the target is picked,
 `guest_can_accept_external()` (axis 4) gates the actual injection mechanism,
 exactly as in the timer-emulation example.
 
-`quantum-sched`'s per-core `deferred_vector` flag no longer exists (removed
-2026-08-04 — see the historical section below); it sat entirely outside this
-model and is not one of the four axes.
+The former per-core `deferred_vector` flag was removed. It sat entirely
+outside this model and is not one of the four axes.
 
 ---
 
@@ -962,8 +961,8 @@ path, per the A3 lazy-unwind contract.
 The following issues from the 2026-03-27 review were also fixed in c2820b5:
 
 - **`DEFERRED_HOST_VECTOR` violating A3 lazy-unwind** — removed entirely.
-  Interrupt deferral is now handled separately via `quantum-sched` feature
-  (see §Nested Virtualization Scheduling).
+  The later interrupt-deferral workaround was also removed; normal
+  capability-engine interrupt routing is used.
 - **`yield_child_to_dom0()` passing dummy vector=0** — function removed.
 - **Ungated debug logging** — cleaned up, gated behind `cfg!(feature = "verbose")`.
 
@@ -1046,10 +1045,11 @@ This goes beyond Directvisor's model (which relies on trap-and-emulate for devic
 I/O) by using an explicit hypercall interface for the performance-critical virtio
 kick notification.
 
-**Capability semantics**: The PV kick hypercall must validate that the calling
-domain holds a capability that permits doorbell notifications (doorbell_id is
-resolved through the capability engine). This is a natural extension of the existing
-`VMCALL_REGISTER_DOORBELL` mechanism.
+**Capability semantics**: Explicit PV requests now invoke a held immutable
+doorbell capability through NOTIFY(handle, value). The engine validates authority
+and interrupt policy. The old address registration mechanism is removed;
+ordinary device MMIO/PIO matching belongs in CHV userspace. Confidential
+virtio/shared-DMA services remain separate unfinished work.
 
 **Prerequisite**: Requires a modified guest virtio-pci driver (or a PV transport)
 that uses VMCALL for kick instead of MMIO write. This is a medium-term optimization.
@@ -1253,8 +1253,8 @@ The software fallback must approximate these behaviors manually.
 
 ## Nested Virtualization Scheduling
 
-*(Added 2026-04-02. Consolidates content from the retired `quantum-sched.md`
-and `todo.md` approach analysis.)*
+Historical findings from the earlier nested-virtualization development setup.
+These are not current boot requirements.
 
 ### The Problem
 
@@ -1280,10 +1280,8 @@ QEMU+KVM (actual L0, physical host)
                  └─ Dom1 (L2, custom Linux, 2 CPUs) → the child VM
 ```
 
-On **real hardware**: VMRESUME takes ~1μs, and posted interrupts suppress
-timer exits entirely. This problem does not exist. This is why the
-`quantum-sched` feature (below) was scoped as dev-environment-only and has
-since been **removed** — see "Status" at the end of this section.
+Standard two-CPU dom1 has since booted on native Linux/KVM using normal
+interrupt routing, without an interrupt-deferral scheduler.
 
 ### Approaches tried (all failed)
 
@@ -1314,106 +1312,14 @@ since been **removed** — see "Status" at the end of this section.
 - **Result**: Dom0 hung_task warnings. SSH intermittently responsive. Too much
   VMCLEAR/VMPTRLD overhead at 1ms granularity.
 
-### Solution (historical): `quantum-sched` feature
+### Removed interrupt-deferral workaround
 
-> **Status: removed** (2026-08-04). This feature was a raw per-core
-> hardware-state mechanism (`CoreContext::deferred_vector`) sitting entirely
-> outside the capability engine's policy model — it deferred/batched
-> interrupt delivery independent of any capa-engine-tracked state, which was
-> flagged in a broader audit as exactly the kind of ad-hoc, non-policy-driven
-> mechanism this codebase is trying to eliminate. It was never enabled by
-> default (opt-in via `CAPAVISOR_FEATURES=quantum-sched`) and was documented
-> as dev-environment-only from the start. The description below is kept for
-> historical record of the nested-virt AP-boot-starvation problem and the
-> approaches tried; **the underlying dev-environment nested-virt scheduling
-> problem itself is not solved** by the removal — if it resurfaces, the fix
-> should be redesigned to route through capa-engine-native mechanisms (e.g.
-> `SwitchContext::interrupt_inject`) rather than reintroducing raw per-core
-> deferred state.
-
-Gate (removed): was `feature = "quantum-sched"` in `themis/capavisor/Cargo.toml`.
-
-Instead of immediately switching back to dom0 on every external interrupt,
-**defer** parent-bound interrupts and re-enter the child (same VMCS, no
-expensive VMCLEAR/VMPTRLD). Deliver the deferred interrupt when the VMX
-preemption timer fires (~20ms), giving the child a guaranteed quantum.
-
-**Why this avoids Approach A's failure**: Approach A consumed vectors but never
-delivered them. This design uses the proven `forward_interrupt_to_handler()`
-path for delivery — just delayed to the quantum boundary.
-
-**Key insight**: The re-entry after deferral is a VMRESUME into the **same**
-child VMCS (no VMCLEAR/VMPTRLD). In nested virt, KVM re-enters L2 directly.
-The ACK'd timer is rearmed for +4ms, so the child gets ~4ms of uninterrupted
-execution before the next timer fires. This is dramatically better than 0
-instructions per quantum.
-
-#### Flow: `EXIT_REASON_EXTERNAL_INTERRUPT` (child VP, quantum-sched enabled)
-
-```
-1. ACK_INTERRUPT_ON_EXIT gives us the vector
-2. Check child's InterruptPolicy for this vector
-3a. Child-owned (Deliver visibility):
-    - Inject directly (same as non-quantum-sched path)
-3b. Parent-bound (Report/NotReport):
-    - If deferred_vector is empty: store vector, VMRESUME child (no switch)
-    - If deferred_vector is set: flush old via forward_interrupt_to_handler
-      (dom0 switch), store new vector as deferred
-```
-
-#### Flow: `EXIT_REASON_VMX_PREEMPTION_TIMER` (child VP, quantum-sched enabled)
-
-```
-1. Check deferred_vector for this core
-2a. Vector deferred:
-    - forward_interrupt_to_handler(vcpu, deferred_vector)
-    - Dom0 gets its timer, scheduler_tick() runs
-    - Child is suspended (lazy-unwind)
-    - thhv retries SWITCH → child gets another quantum
-2b. No deferred vector:
-    - Reset preemption timer (current behavior)
-```
-
-#### Per-core state
-
-```rust
-// In platform.rs, added to CoreContext:
-pub deferred_vector: AtomicU16,  // 0 = none, 1-255 = vector
-```
-
-Helper methods on `ThemisPlatform`:
-- `set_deferred(core_id, vector)` — store a deferred vector
-- `take_deferred(core_id) -> Option<u8>` — atomically take (swap to 0)
-
-#### Multiple interrupts
-
-If `deferred_vector` is already set when a new parent-bound interrupt arrives,
-the existing deferred vector is flushed first (via `forward_interrupt_to_handler`),
-then the new one stored. This prevents lost interrupts. In practice, only one
-dom0 timer fires per ~4ms, and our quantum is ~20ms, so at most ~5 deferred
-timers accumulate — but we handle the general case correctly.
-
-#### Constraints
-
-- **Dom0 has no PID page** — cannot use `inject_via_pid()` for dom0. Must use
-  the existing lazy-unwind path which does VMCLEAR/VMPTRLD and injects via
-  `VMENTRY_INTR_INFO`.
-- **Only parent-bound interrupts deferred** — child-owned (`Deliver` visibility)
-  and device interrupts forwarded immediately.
-- **Preemption timer quantum** — currently 60M ticks (~20ms at rate divisor 5,
-  3GHz TSC). Adjustable via `PREEMPTION_TIMER_TICKS`.
-- **A3 lazy-unwind preserved** — the interrupt IS delivered, just batched to
-  the quantum boundary. Same delivery path, same capability checks, same
-  vector injection.
-
-#### Files modified
-
-| File | Change |
-|------|--------|
-| `themis/capavisor/Cargo.toml` | Add `quantum-sched = []` feature |
-| `themis/capavisor/src/platform.rs` | `deferred_vector` in CoreContext + helpers |
-| `themis/capavisor/src/vmexit.rs` | Conditional deferral in ext-intr and preemption-timer handlers |
-| `themis/capavisor/src/hypercall.rs` | `is_parent_bound_vector()` helper |
+The former `quantum-sched` feature and its per-core deferred-vector state
+were removed because they bypassed capability-engine policy. There is no
+replacement feature flag to enable. If the historical starvation problem
+recurs, investigate the normal capability-engine interrupt path rather than
+restoring a separate scheduler. Earlier environment findings are retained in
+the [archived session notes](../archive/session-notes/07_04_2026.md).
 
 #### Other observations
 

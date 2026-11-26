@@ -58,40 +58,20 @@ pub fn allocate_vp(
 
     let arc = platform.domain_arc(domain_id).ok_or(CapaError::NotFound)?;
 
-    // ── Pre-allocate VMCS + VAPIC + PID from child's META pool ──
-    //
-    // Per-VP META page layout (current):
-    //   Page 0 (4 KB): VMCS — Intel requires a full 4 KB page.
-    //   Page 1 (4 KB): VAPIC — Virtual-APIC page; hardware maps the xAPIC
-    //     register space here.  xAPIC registers occupy offsets 0x000–0x3FF
-    //     (1 KB); offsets 0x400–0xFFF (3 KB) are architecturally reserved
-    //     and never accessed by hardware or the guest APIC emulation.
-    //   Page 2 (4 KB): PID — Posted-Interrupt Descriptor; only 64 bytes are
-    //     used (PIR bitmap + ON/SN/NV/NDST fields; Intel SDM Vol 3C §29.6).
-    //
-    // Optimization opportunity (TODO): sub-allocate the PID from the
-    // VAPIC page at offset 0x400 (naturally 64-byte aligned, in the unused
-    // upper 3 KB).  This would reduce per-VP META consumption from 3 pages
-    // to 2 pages, matching the original THHV_META_PAGES_PER_VP=2 budget.
-    // Requires computing pid_phys = vapic_phys + 0x400 instead of
-    // allocating a separate frame, and reverting THHV_META_PAGES_PER_VP to 2.
+    // Seven private META pages: VMCS, VAPIC, PID, MSR save/restore list,
+    // MSR bitmap, and two I/O bitmaps. PID suballocation could save one page.
     let (
         vmcs_phys,
         vapic_phys,
         pid_phys,
         msr_list_phys,
         msr_bitmap_phys,
-        apic_access_phys,
         io_bitmap_a_phys,
         io_bitmap_b_phys,
-        first_vp,
     );
     {
         let mut pd = arc.lock();
-        // Check if this is the first VP (need extra pages for MSR + IO bitmaps).
-        first_vp = pd.arch.msr_bitmap_phys() == 0;
-        // Per VP: VMCS + VAPIC + PID + MSR-list (+ MSR bitmap + 2 IO bitmaps if first VP).
-        let pages_needed = if first_vp { 7 } else { 4 };
+        let pages_needed = 7;
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
                 "[ADD_VP] not enough META pages: need {} have {}",
@@ -104,20 +84,13 @@ pub fn allocate_vp(
         vapic_phys = pd.meta.alloc_frame();
         pid_phys = pd.meta.alloc_frame();
         msr_list_phys = pd.meta.alloc_frame();
-        if first_vp {
-            let msr_phys = pd.meta.alloc_frame();
-            pd.arch.set_msr_bitmap_phys(msr_phys);
-            let io_a_phys = pd.meta.alloc_frame();
-            pd.arch.set_io_bitmap_a_phys(io_a_phys);
-            let io_b_phys = pd.meta.alloc_frame();
-            pd.arch.set_io_bitmap_b_phys(io_b_phys);
-        }
-        msr_bitmap_phys = pd.arch.msr_bitmap_phys();
-        io_bitmap_a_phys = pd.arch.io_bitmap_a_phys();
-        io_bitmap_b_phys = pd.arch.io_bitmap_b_phys();
-        // apic_access_phys was recorded by apply_update when thhv mapped the
-        // APIC-access sentinel page at GPA 0xFEE00000 via THHV_SEND_SHARED_META.
-        apic_access_phys = pd.arch.apic_access_phys();
+        msr_bitmap_phys = pd.meta.alloc_frame();
+        io_bitmap_a_phys = pd.meta.alloc_frame();
+        io_bitmap_b_phys = pd.meta.alloc_frame();
+        pd.arch.set_vp_bitmaps(
+            vp_id as usize,
+            [msr_bitmap_phys, io_bitmap_a_phys, io_bitmap_b_phys],
+        );
     }
 
     // Zero the PID (64 bytes at offset 0 of the PID page; must be clean before VMENTRY).
@@ -154,44 +127,10 @@ pub fn allocate_vp(
         vapic.add(0x3E0 / 4).write_volatile(0x0000_000B);
     }
 
-    // Initialize IO bitmaps: zero (pass-through) then set bits for device ports
-    // that CHV needs to emulate.
-    // IO bitmap A covers ports 0x0000-0x7FFF (bit N = port N).
-    // IO bitmap B covers ports 0x8000-0xFFFF. Only bitmap A is used here.
-    if first_vp && io_bitmap_a_phys != 0 {
-        unsafe {
-            // Zero both pages: all ports pass-through by default.
-            core::ptr::write_bytes((io_bitmap_a_phys + hhdm) as *mut u8, 0, 4096);
-            core::ptr::write_bytes((io_bitmap_b_phys + hhdm) as *mut u8, 0, 4096);
-
-            let bitmap_a = (io_bitmap_a_phys + hhdm) as *mut u8;
-
-            // Helper: set bit for port N → byte N/8, bit N%8.
-            macro_rules! trap_port {
-                ($port:expr) => {
-                    let byte = $port / 8;
-                    let bit = $port % 8;
-                    let old = bitmap_a.add(byte).read_volatile();
-                    bitmap_a.add(byte).write_volatile(old | (1u8 << bit));
-                };
-            }
-
-            // Serial COM1: 0x3F8-0x3FF (UART emulation for dom1 console)
-            for p in 0x3F8u16..=0x3FF {
-                trap_port!(p as usize);
-            }
-
-            // NOTE: PIT (0x40-0x43), i8042 (0x60,0x64), PM-timer (0x608) intentionally
-            // NOT trapped — CHV's emulated PIT can't deliver IRQ0 back to dom1, so
-            // trapping these causes dom1 to lose its scheduler tick and hang at 0x30.
-            // Dom1 accesses dom0's hardware directly for these; the CHV timer (0xEC)
-            // provides the LAPIC timer tick independently.
-        }
-        serial_println!(
-            "  IO bitmaps: A={:#x} B={:#x} (serial 0x3F8-0x3FF trapped)",
-            io_bitmap_a_phys,
-            io_bitmap_b_phys,
-        );
+    // Fail closed until the engine's effective VP policy is projected.
+    unsafe {
+        core::ptr::write_bytes((io_bitmap_a_phys + hhdm) as *mut u8, 0xff, 4096);
+        core::ptr::write_bytes((io_bitmap_b_phys + hhdm) as *mut u8, 0xff, 4096);
     }
 
     // Initialize MSR bitmap as a pure projection of the child's MsrPolicy.
@@ -208,7 +147,7 @@ pub fn allocate_vp(
     //   bytes 1024-2047: RDMSR bitmap for MSRs 0xC0000000–0xC0001FFF
     //   bytes 2048-3071: WRMSR bitmap for MSRs 0x0–0x1FFF
     //   bytes 3072-4095: WRMSR bitmap for MSRs 0xC0000000–0xC0001FFF
-    if first_vp && msr_bitmap_phys != 0 {
+    if msr_bitmap_phys != 0 {
         // SAFETY: `msr_bitmap_phys` is a freshly-allocated 4 KiB META
         // frame for this child's MSR bitmap; the VMCS that will reference
         // it has not been loaded on any core yet.
@@ -256,7 +195,6 @@ pub fn allocate_vp(
             msr_list_phys,
             hhdm,
             pid_phys,
-            apic_access_phys,
             io_bitmap_a_phys,
             io_bitmap_b_phys,
             eptp,

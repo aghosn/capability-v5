@@ -4,6 +4,7 @@ use std::io::Write;
 /// Represents a recorded command in the session
 #[derive(Debug, Clone)]
 pub enum Command {
+    CapabilityCommand { text: String },
     Init {
         name: String,
         size: u64,
@@ -128,6 +129,7 @@ impl Session {
 
         for cmd in &self.commands {
             let line = match cmd {
+                Command::CapabilityCommand { text } => text.clone(),
                 Command::Init { name, size } => {
                     format!("init {} 0x{:x}", name, size)
                 }
@@ -216,6 +218,10 @@ impl Session {
     /// matching `[[test]]` entry added to `capa-engine/Cargo.toml` to be run
     /// by `cargo test` (mirroring every other file under `tests/unit/`).
     pub fn save_as_test(&self, filename: &str) -> std::io::Result<()> {
+        if self.commands.iter().any(|cmd| matches!(cmd, Command::CapabilityCommand { .. })) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+                "Raw capability commands can be saved as a replay script, but not exported as a Rust test"));
+        }
         let mut file = File::create(filename)?;
 
         // Write test header
@@ -244,6 +250,7 @@ impl Session {
 
         for cmd in &self.commands {
             match cmd {
+                Command::CapabilityCommand { .. } => unreachable!("checked before creating test file"),
                 Command::Init { name, size } => {
                     let domain_var = format!("{}_cap", sanitize_name(name));
                     let mem_var    = format!("{}_mem_cap", sanitize_name(name));
@@ -714,7 +721,10 @@ fn parse_api_bits(api: &str) -> String {
             "REVOKE"            => 1 << 10,
             "GETCHAN"           => 1 << 11,
             "RECEIVE_AFTER_SEAL"=> 1 << 12,
-            "ALL"               => 0x1FFF,
+            "MAP_SELF"          => 1 << 13,
+            "CREATE_DOORBELL"   => 1 << 14,
+            "NOTIFY"            => 1 << 15,
+            "ALL"               => capability_engine::MonitorAPI::ALL.bits(),
             _                   => 0,
         };
     }

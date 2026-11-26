@@ -21,7 +21,7 @@ use crate::vcpu::{ActiveVcpu, Reg};
 
 use super::{
     CPUID_DEBUG_RANGE_END, CPUID_DEBUG_RANGE_START, CPUID_HV_RANGE_END, CPUID_THEMIS_MAX,
-    DOMCOMM_GPA, DOMCOMM_PAGES, THEMIS_MAX_MEM_REGIONS, THEMIS_MAX_PARTITIONS, THEMIS_MAX_VPS,
+    THEMIS_MAX_MEM_REGIONS, THEMIS_MAX_PARTITIONS, THEMIS_MAX_VPS,
 };
 
 // ── AVX-512 feature bit masks (Intel SDM Vol 2A §3.2, leaf 0x7 sub 0) ─── //
@@ -65,7 +65,7 @@ bitflags::bitflags! {
 /// and not apply further masking); `false` otherwise.
 fn handle_themis_leaf(
     leaf: u32,
-    _sub_leaf: u32,
+    sub_leaf: u32,
     platform: &crate::platform::ThemisPlatform,
     eax: &mut u32,
     ebx: &mut u32,
@@ -82,7 +82,7 @@ fn handle_themis_leaf(
         }
         themis_abi::cpuid::LEAF_FEATURES => {
             use themis_abi::cpuid::feature_bits::*;
-            let mut bits = FEATURE_SYNC_SWITCH | FEATURE_DOORBELL_HYPERCALL;
+            let mut bits = FEATURE_SYNC_SWITCH | FEATURE_CAPABILITY_DOORBELLS;
             // Advertise hardware x2APIC virtualization to dom0 userspace
             // (CHV) only when the CPU exposes VIRT_X2APIC_MODE +
             // APIC_REGISTER_VIRT + VID. On nested KVM these are usually
@@ -102,31 +102,27 @@ fn handle_themis_leaf(
             true
         }
         themis_abi::cpuid::LEAF_DOMCOMM => {
-            // Per-domain DomainComm discovery: look up the calling domain's
-            // DomainComm header HPA.  Falls back to the global dom0 value
-            // for domains that don't have their own DomainComm yet.
-            let mut found = false;
+            *eax = 0;
+            *ebx = 0;
+            *ecx = 0;
+            *edx = 0;
             if let Some(core_id) = platform.get_current_core() {
                 let dom_id = platform.core_domain_id(core_id as usize);
                 if let Some(arc) = platform.domain_arc(dom_id) {
                     let pd = arc.lock();
                     if let Some(ref dc) = pd.domcomm {
-                        *eax = dc.header_hpa as u32;
-                        *ebx = (dc.header_hpa >> 32) as u32;
-                        *ecx = 1 + dc.rx.page_hpas.len() as u32 + dc.tx.page_hpas.len() as u32;
-                        *edx = 0;
-                        found = true;
+                        let index = sub_leaf.saturating_sub(1) as usize;
+                        if let Some(gpa) = dc.page_gpa(index) {
+                            *eax = gpa as u32;
+                            *ebx = (gpa >> 32) as u32;
+                            *ecx = if sub_leaf == 0 {
+                                1 + dc.rx.page_hpas.len() as u32 + dc.tx.page_hpas.len() as u32
+                            } else { 1 };
+                            *edx = themis_abi::cpuid::DOMCOMM_PAGE_LIST
+                                | themis_abi::cpuid::DOMCOMM_SYNC_GROW;
+                        }
                     }
                 }
-            }
-            if !found {
-                // Fallback: global dom0 values (bootstrap path).
-                let gpa = DOMCOMM_GPA.load(core::sync::atomic::Ordering::Relaxed);
-                let pages = DOMCOMM_PAGES.load(core::sync::atomic::Ordering::Relaxed);
-                *eax = gpa as u32;
-                *ebx = (gpa >> 32) as u32;
-                *ecx = pages;
-                *edx = 0;
             }
             true
         }
@@ -145,6 +141,20 @@ fn handle_themis_leaf(
             *ebx = 0;
             *ecx = 0;
             *edx = 0;
+            true
+        }
+        themis_abi::cpuid::LEAF_PV if sub_leaf == themis_abi::cpuid::PV_SUBLEAF_IDENTITY => {
+            *eax = 0;
+            *ebx = 0;
+            *ecx = 0;
+            *edx = 0;
+            if let Some(core) = platform.get_current_core() {
+                let vp = platform.get_core_vp(core as usize);
+                if vp < THEMIS_MAX_VPS {
+                    *eax = vp;
+                    *edx = themis_abi::pv::VERSION;
+                }
+            }
             true
         }
         // Surrounding hypervisor range (zeroed) — must come after the

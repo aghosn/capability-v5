@@ -67,7 +67,8 @@ pub unsafe fn raw_vmcall(
         lateout("r9") _,
         lateout("r10") _,
         lateout("r11") _,
-        options(nomem, nostack),
+        // SWITCH and doorbells synchronize memory with another domain.
+        options(nostack),
     );
     (rax, rdi, rsi, rdx)
 }
@@ -131,22 +132,22 @@ pub fn map_self(cap: u64, new_gpa: u64) -> Result<(), u64> {
     check(rax)
 }
 
-/// Send a memory capability to a receiver domain.
+/// Send a capability to a receiver domain or channel.
 pub fn send(cap: u64, receiver: u64, attrs: u64) -> Result<(), u64> {
-    let (rax, _, _, _) = unsafe { vmcall3(opcodes::THEMIS_SEND, cap, receiver, attrs) };
+    let (rax, _, _, _) = unsafe { vmcall4(opcodes::THEMIS_SEND, cap, receiver, attrs, u64::MAX) };
     check(rax)
 }
 
 /// Send a memory capability with a GPA hint for the receiver.
 ///
 /// `child_gpa` specifies where the region appears in the receiver's guest
-/// address space.  If 0, the capavisor uses identity mapping (GPA = HPA).
+/// address space. `u64::MAX` means no hint; zero is a valid explicit GPA.
 pub fn send_at(cap: u64, receiver: u64, attrs: u64, child_gpa: u64) -> Result<(), u64> {
     let (rax, _, _, _) = unsafe { vmcall4(opcodes::THEMIS_SEND, cap, receiver, attrs, child_gpa) };
     check(rax)
 }
 
-/// Accept a pending memory capability.
+/// Accept a pending capability.
 ///
 /// Returns the new capability handle.
 pub fn accept(pending_id: u64) -> Result<u64, u64> {
@@ -155,7 +156,7 @@ pub fn accept(pending_id: u64) -> Result<u64, u64> {
     Ok(rdi)
 }
 
-/// Reject a pending memory capability.
+/// Reject a pending capability.
 pub fn reject(pending_id: u64) -> Result<(), u64> {
     let (rax, _, _, _) = unsafe { vmcall1(opcodes::THEMIS_REJECT, pending_id) };
     check(rax)
@@ -183,15 +184,9 @@ pub fn seal(domain: u64) -> Result<(), u64> {
     check(rax)
 }
 
-/// Revoke a child of a memory capability.
-pub fn revoke_mem(parent: u64, child_sub: u64) -> Result<(), u64> {
-    let (rax, _, _, _) = unsafe { vmcall2(opcodes::THEMIS_REVOKE_MEM, parent, child_sub) };
-    check(rax)
-}
-
-/// Revoke an entire child domain.
-pub fn revoke_domain(domain: u64) -> Result<(), u64> {
-    let (rax, _, _, _) = unsafe { vmcall1(opcodes::THEMIS_REVOKE_DOMAIN, domain) };
+/// Revoke a tree child. A zero subhandle destroys an owned child domain.
+pub fn revoke(parent: u64, child_sub: u64) -> Result<(), u64> {
+    let (rax, _, _, _) = unsafe { vmcall2(opcodes::THEMIS_REVOKE, parent, child_sub) };
     check(rax)
 }
 
@@ -210,23 +205,38 @@ pub fn get_chan(domain: u64) -> Result<u64, u64> {
     Ok(rdi)
 }
 
-/// Send a memory capability through a channel.
-///
-/// `chan_handle` — channel obtained via `get_chan` or `accept_chan`.
-/// `cap_handle` — the memory capability to send.
-/// `attrs` — attribute bits for the receiver (e.g., SHARED).
-pub fn send_chan(chan_handle: u64, cap_handle: u64, attrs: u64) -> Result<(), u64> {
-    let (rax, _, _, _) = unsafe { vmcall3(opcodes::THEMIS_SEND_CHAN, chan_handle, cap_handle, attrs) };
-    check(rax)
+/// Create an immutable endpoint; `None` selects self, otherwise an owned child.
+/// Returns the invocation handle and recipient-tree port.
+pub fn create_doorbell(
+    child: Option<u64>,
+    vector: u8,
+    async_vp: Option<u64>,
+) -> Result<(u64, u64), u64> {
+    let (status, handle, port, _) = unsafe {
+        raw_vmcall(
+            opcodes::THEMIS_CREATE_DOORBELL,
+            child.unwrap_or(u64::MAX),
+            vector as u64,
+            u64::from(async_vp.is_some()),
+            async_vp.unwrap_or(0),
+            0,
+        )
+    };
+    check(status)?;
+    Ok((handle, port))
 }
 
-/// Accept a pending channel capability.
-///
-/// Returns the new channel handle.
-pub fn accept_chan(pending_id: u64) -> Result<u64, u64> {
-    let (rax, rdi, _, _) = unsafe { vmcall1(opcodes::THEMIS_ACCEPT_CHAN, pending_id) };
-    check(rax)?;
-    Ok(rdi)
+/// Notify with an opaque value. Sync returns to its recipient's blocked caller.
+pub fn notify(handle: u64, value: u64) -> Result<(), u64> {
+    let (status, _, _, _) = unsafe { vmcall2(opcodes::THEMIS_NOTIFY, handle, value) };
+    check(status)
+}
+
+/// Find the first pending offer at or after `start`, independent of type.
+pub fn enumerate_pending(start: u64) -> Result<Option<u64>, u64> {
+    let (status, id, found, _) = unsafe { vmcall1(opcodes::THEMIS_ENUMERATE, start) };
+    check(status)?;
+    Ok(if found == 0 { None } else { Some(id) })
 }
 
 /// Self-attestation (unsigned, offset=0).
@@ -303,47 +313,6 @@ pub fn add_vp(child_domain: u64, comm_cap: u64) -> Result<u64, u64> {
     let (rax, rdi, _, _) = unsafe { vmcall2(opcodes::THEMIS_ADD_VP, child_domain, comm_cap) };
     check(rax)?;
     Ok(rdi)
-}
-
-/// Register a doorbell entry for a child domain.
-/// Returns the assigned doorbell_id on success.
-pub fn register_doorbell(
-    child_domain: u64,
-    gpa: u64,
-    size: u64,
-    datamatch: u64,
-    flags: u64,
-) -> Result<u64, u64> {
-    let (rax, rdi, _, _) = unsafe {
-        raw_vmcall(
-            opcodes::THEMIS_REGISTER_DOORBELL,
-            child_domain,
-            gpa,
-            size,
-            datamatch,
-            flags,
-        )
-    };
-    check(rax)?;
-    Ok(rdi)
-}
-
-/// Unregister a previously registered doorbell entry.
-pub fn unregister_doorbell(child_domain: u64, doorbell_id: u64) -> Result<(), u64> {
-    let (rax, _, _, _) = unsafe {
-        vmcall2(
-            opcodes::THEMIS_UNREGISTER_DOORBELL,
-            child_domain,
-            doorbell_id,
-        )
-    };
-    check(rax)
-}
-
-/// Configure the notify_vector for DomainComm doorbell IPIs from the capavisor.
-pub fn set_themic_vector(vector: u64) -> Result<(), u64> {
-    let (rax, _, _, _) = unsafe { vmcall1(opcodes::THEMIS_SET_THEMIC_VECTOR, vector) };
-    check(rax)
 }
 
 /// Register a COMM page owned by the caller, bound to a child domain's VP.

@@ -148,7 +148,6 @@ pub unsafe fn setup_child_vmcs(
     msr_list_phys: u64,
     hhdm: u64,
     pid_phys: u64,
-    apic_access_phys: u64,
     io_bitmap_a_phys: u64,
     io_bitmap_b_phys: u64,
     eptp: u64,
@@ -165,7 +164,7 @@ pub unsafe fn setup_child_vmcs(
         msr_list_phys,
         msr_list_count,
         pid_phys,
-        apic_access_phys,
+        0,
         io_bitmap_a_phys,
         io_bitmap_b_phys,
         vpid,
@@ -175,11 +174,10 @@ pub unsafe fn setup_child_vmcs(
     guest::write_guest_state();
 
     serial_println!(
-        "  child VMCS: phys={:#x} VAPIC={:#x} PID={:#x} APIC_ACC={:#x} EPTP={:#x} VPID={}",
+        "  child VMCS: phys={:#x} VAPIC={:#x} PID={:#x} EPTP={:#x} VPID={}",
         vmcs_phys,
         vapic_phys,
         pid_phys,
-        apic_access_phys,
         eptp,
         vpid,
     );

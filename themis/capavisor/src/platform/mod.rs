@@ -94,12 +94,11 @@ pub type InactiveVp = <ArchDomainState as ArchDomain>::InactiveVp;
 
 mod domain;
 mod maps;
+mod registers;
 mod sync;
 pub(crate) mod vcpu_slot;
 
-pub use domain::{DoorbellEntry, PlatformDomain, THEMIC_DOORBELL_FLAG_ANY_SIZE,
-    THEMIC_DOORBELL_FLAG_ANY_VALUE, THEMIC_MAX_DOORBELLS,
-};
+pub use domain::PlatformDomain;
 pub use vcpu_slot::CoreContext;
 
 use maps::DomainTable;
@@ -497,69 +496,52 @@ impl ThemisPlatform {
         self.get_current_core()
     }
 
-    /// Apply a `PolicyChange` delta to per-domain hardware state.
-    ///
-    /// Today only MSR variants project to hardware (the per-domain VMX
-    /// MSR bitmap, x86-only). The other variants are no-ops with
-    /// explicit TODO markers — kept as match arms so any future
-    /// engine-side addition causes a compile-time miss here.
-    fn apply_policy_change(
-        &self,
-        domain: DomainId,
-        change: &capability_engine::PolicyChange,
-    ) {
+    /// Project engine-supplied effective VP policy without re-reading it.
+    fn apply_policy_change(&self, domain: DomainId, change: &capability_engine::PolicyChange) {
         use capability_engine::PolicyChange as PC;
 
         match change {
             #[cfg(target_arch = "x86_64")]
-            PC::MsrDefault(action) => {
-                if let Some(phys) = self.msr_bitmap_phys(domain) {
-                    // SAFETY: bitmap_phys is the domain's MSR bitmap
-                    // page; hardware re-reads the bitmap on every MSR
-                    // access so partial updates between set_default and
-                    // the subsequent range/override re-emits are safe.
-                    let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-                    unsafe { msr_bitmap::set_default(phys, hhdm, *action); }
+            PC::VpInterception { vp_id, msrs, exits } => {
+                let arc = self.domains.get(domain).expect("VP policy domain must exist");
+                let pd = arc.lock();
+                let [msr, io_a, io_b] = pd.arch.vp_bitmaps(*vp_id as usize)
+                    .expect("VP policy bitmaps must exist");
+                let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+                let trap = exits.get_action(themis_abi::vmx_exit_reasons::IO_INSTRUCTION).trap;
+                let byte = if trap { 0xff } else { 0 };
+                // Policy changes are pre-seal and serialized through projection.
+                unsafe {
+                    msr_bitmap::populate_from_policy(msr, hhdm, msrs);
+                    core::ptr::write_bytes((io_a + hhdm) as *mut u8, byte, 4096);
+                    core::ptr::write_bytes((io_b + hhdm) as *mut u8, byte, 4096);
                 }
             }
-            #[cfg(target_arch = "x86_64")]
-            PC::MsrRange { start, end, action } => {
-                if let Some(phys) = self.msr_bitmap_phys(domain) {
-                    let trap = matches!(action, capability_engine::DefaultAction::Trap);
-                    let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-                    unsafe { msr_bitmap::apply_range(phys, hhdm, *start, *end, trap); }
-                }
-            }
-            #[cfg(target_arch = "x86_64")]
-            PC::MsrEmulate { msr, .. } => {
-                if let Some(phys) = self.msr_bitmap_phys(domain) {
-                    // Emulate ⇒ trap (capavisor's emulator runs on exit).
-                    let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-                    unsafe { msr_bitmap::trap_msr(phys, hhdm, *msr, true); }
-                }
-            }
-
-            // Non-x86 builds: MSR variants have no projection.
             #[cfg(not(target_arch = "x86_64"))]
+            PC::VpInterception { .. } => {}
+
             PC::MsrDefault(_) | PC::MsrRange { .. } | PC::MsrEmulate { .. } => {}
 
             // CPUID is always trapped via CPUID-exiting=1 and dispatched
             // at exit against the live engine policy; no derived bitmap.
             PC::CpuidDefault(_)
             | PC::CpuidRange { .. }
+            | PC::CpuidEmulateRange { .. }
             | PC::CpuidEmulate { .. } => {}
 
-            // Exit-routing → VMCS procbased/pin/exit/entry controls.
-            // TODO: project to VMCS controls when policy.exits drives them.
+            // Hardware interception is projected by VpInterception snapshots.
             PC::DefaultExitTrap(_)
+            | PC::DefaultExitRegReadSet { .. }
+            | PC::DefaultExitRegWriteSet { .. }
             | PC::ExitReason { .. }
             | PC::ExitReasonRegReadSet { .. }
             | PC::ExitReasonRegWriteSet { .. } => {}
 
             // Interrupt visibility / per-vector reg sets — consumed at
             // exit dispatch time; no derived hardware bitmap today.
-            // TODO when A3 (lazy-unwind) relaxes and EOI-exit bitmap is used.
             PC::InterruptDefaultVisibility(_)
+            | PC::DefaultInterruptRegReadSet { .. }
+            | PC::DefaultInterruptRegWriteSet { .. }
             | PC::VectorVisibility { .. }
             | PC::VectorRegReadSet { .. }
             | PC::VectorRegWriteSet { .. } => {}
@@ -567,7 +549,7 @@ impl ThemisPlatform {
             // Per-vector explicit-injection permission — consumed directly
             // by `do_inject_interrupt` at THEMIS_INJECT_INTERRUPT call time
             // (reads `policy.interrupts` live); no derived hardware state.
-            PC::VectorInjectable { .. } => {}
+            PC::VectorInjectable { .. } | PC::DefaultVectorInjectable(_) => {}
 
             // Pure engine ACLs (no hardware effect).
             PC::Cores(_) | PC::ApiMonitor(_) => {}
@@ -575,52 +557,73 @@ impl ThemisPlatform {
 
         let _ = domain;
     }
-
-    /// Look up the per-domain MSR bitmap physical address, or `None` if
-    /// the domain isn't registered yet or has no bitmap allocated (will
-    /// be projected from policy by the next `do_add_vp`).
-    #[cfg(target_arch = "x86_64")]
-    fn msr_bitmap_phys(&self, domain: DomainId) -> Option<u64> {
-        let d = self.domains.get(domain)?;
-        let phys = d.lock().arch.msr_bitmap_phys();
-        if phys == 0 { None } else { Some(phys) }
-    }
-
-    /// Re-project the sealed domain's full MsrPolicy onto its VMCS MSR
-    /// bitmap. Called from `Capability::seal`'s `on_domain_sealed` hook,
-    /// under the engine's op-lock, so that seal is the authoritative
-    /// synchronization point between the engine's policy state and the
-    /// hardware bitmap — regardless of the order in which userspace
-    /// issued `THHV_SET_POLICY` and `THHV_CREATE_VP` (which cannot be
-    /// trusted per axiom A2).
-    ///
-    /// If the domain has no MSR bitmap yet (no VP was ever added,
-    /// therefore the bitmap page was never allocated), this is a no-op:
-    /// there is no hardware state to stale. Any future `do_add_vp` will
-    /// project the current policy at that time.
-    #[cfg(target_arch = "x86_64")]
-    pub fn reproject_msr_policy(&self, domain_id: DomainId, msrs: &capability_engine::MsrPolicy) {
-        let Some(phys) = self.msr_bitmap_phys(domain_id) else {
-            return;
-        };
-        let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-        // SAFETY: `phys` is the domain's dedicated MSR bitmap page; the
-        // domain is sealed but its VPs have not been dispatched to any
-        // physical core yet (dispatch happens after seal on the userspace
-        // side via THHV_RUN_VP). Rewriting the bitmap here races only
-        // with subsequent SetPolicy calls which serialize through the
-        // capa-engine op-lock via apply_update.
-        unsafe {
-            crate::arch::x86_64::msr_bitmap::populate_from_policy(phys, hhdm, msrs);
-        }
-    }
-
-    /// Non-x86 stub for `reproject_msr_policy` — no MSR bitmap exists.
-    #[cfg(not(target_arch = "x86_64"))]
-    pub fn reproject_msr_policy(&self, _domain_id: DomainId, _msrs: &capability_engine::MsrPolicy) {}
 }
 
 impl Platform for ThemisPlatform {
+    #[cfg(target_arch = "x86_64")]
+    fn commit_doorbell(
+        &self,
+        notification: &capability_engine::DoorbellNotification,
+        commit: &mut dyn FnMut(),
+    ) -> Result<()> {
+        use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
+        use capability_engine::{CapaError, DoorbellKind};
+        use themis_abi::domcomm::{DoorbellEvent, DomCommMessage};
+
+        let recipient = self.domain_arc(notification.doorbell.recipient)
+            .ok_or(CapaError::NotFound)?;
+        let source = if notification.doorbell.kind == DoorbellKind::Sync {
+            let core = self.get_current_core().ok_or(CapaError::NotFound)?;
+            let ptr = self.active_vcpu_ptr(core) as *mut crate::vcpu::ActiveVcpu;
+            if ptr.is_null() {
+                return Err(CapaError::NotFound);
+            }
+            Some(ptr)
+        } else {
+            None
+        };
+        let message = DoorbellEvent {
+            port: notification.doorbell.port_id,
+            value: notification.value,
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &message as *const _ as *const u8, core::mem::size_of_val(&message),
+            )
+        };
+        let pid = {
+            let mut pd = recipient.lock();
+            let pid = pd.arch.vps().get(notification.recipient_vp as usize)
+                .ok_or(CapaError::NotFound)?.peek_pid_phys();
+            if pid == 0 || pd.domcomm.is_none() {
+                return Err(CapaError::NotFound);
+            }
+            let reserved = pd.prepare_rx_write(bytes.len())
+                .ok_or(CapaError::NotificationQueueFull)?;
+            pd.commit_rx_write(reserved, DoorbellEvent::MSG_TYPE, bytes);
+            pid
+        };
+        if let Some(ptr) = source {
+            // Finish NOTIFY only after validation/publication and before the
+            // shared interrupt handoff saves the source VP.
+            unsafe {
+                let vp = &mut *ptr;
+                crate::arch::x86_64::hypercall::write_reply(
+                    vp, crate::arch_traits::types::HypercallResult::success(),
+                );
+                vp.next_rip();
+            }
+        } else {
+            unsafe {
+                crate::arch::x86_64::pid::inject_via_pid(
+                    pid, self.hhdm_offset(), notification.doorbell.vector, true,
+                );
+            }
+        }
+        commit();
+        Ok(())
+    }
+
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
         Ok(Box::new(SharedGuard::new(&self.op_lock, self)))
     }
@@ -832,8 +835,28 @@ impl Platform for ThemisPlatform {
                 phys,
                 size,
             } => {
-                let _ = (domain_id, target_domain_id, vp_id, phys, size);
-                // TODO(P7): unmap COMM page.
+                if let Some(arc) = self.domains.get(*target_domain_id) {
+                    let mut pd = arc.lock();
+                    let contains = |page: &u64| *page >= *phys && *page - *phys < *size;
+                    if *vp_id == u32::MAX {
+                        pd.pending_domcomm_hpas.retain(|page| !contains(page));
+                        let active = pd.domcomm.as_ref().is_some_and(|dc|
+                            contains(&dc.header_hpa)
+                                || dc.rx.page_hpas.iter().any(contains)
+                                || dc.tx.page_hpas.iter().any(contains));
+                        if active {
+                            pd.domcomm = None;
+                            pd.attest_payload = None;
+                            crate::serial_println!(
+                                "[domcomm] domain {} communication memory revoked", target_domain_id);
+                        }
+                    } else if let Some(page) = pd.comm_hpas.get_mut(*vp_id as usize) {
+                        if contains(page) {
+                            *page = 0;
+                        }
+                    }
+                }
+                let _ = domain_id;
             }
 
             /// Domain-wide policy mutation. The platform re-projects any
@@ -884,7 +907,7 @@ impl Platform for ThemisPlatform {
         &self,
         domain_id: DomainId,
         interrupts: &capability_engine::InterruptPolicy,
-        msrs: &capability_engine::MsrPolicy,
+        _msrs: &capability_engine::MsrPolicy,
     ) {
         // Finalize DomainComm if pages were registered pre-seal.
         if let Some(header_hpa) = self.finalize_domcomm(domain_id) {
@@ -894,17 +917,6 @@ impl Platform for ThemisPlatform {
                 header_hpa,
             );
         }
-
-        // Enforcement (A1/A2): at seal time, re-project the domain's final
-        // MsrPolicy onto its VMCS MSR bitmap. Userspace is untrusted (A2)
-        // and may push SET_POLICY ioctls in any order relative to
-        // CREATE_VP; without this re-projection, a policy change that
-        // arrived after do_add_vp would leave the bitmap stale (do_add_vp
-        // snapshots the policy at first-VP time, and apply_policy_change
-        // silently no-ops when the bitmap page isn't allocated yet).
-        // Making seal the synchronization point guarantees policy ⊆
-        // bitmap by the time any VP can run.
-        self.reproject_msr_policy(domain_id, msrs);
 
         self.program_domain_irtes(domain_id, interrupts);
     }
@@ -936,18 +948,17 @@ impl Platform for ThemisPlatform {
         // SAFETY: comm_hpa was registered for this VP via THHV_CREATE_VP,
         // and no other VpCommView is live here (single-threaded under the
         // engine's op lock).
-        let dirty = match unsafe { crate::comm::VpCommView::map(comm_hpa, self.hhdm_offset()) } {
-            None => Vec::new(),
-            Some(mut view) => view
-                .take_dirty()
-                .into_iter()
-                .filter(|(reg, _)| write_set.is_set(*reg as u64))
-                .collect(),
-        };
+        let mut view = unsafe { crate::comm::VpCommView::map(comm_hpa, self.hhdm_offset()) }
+            .ok_or_else(|| {
+                capability_engine::CapaError::InvalidOperation("invalid VP COMM page".into())
+            })?;
+        let dirty = view.take_dirty();
         if vp >= pd.pending_comm_regs.len() {
             pd.pending_comm_regs.resize(vp + 1, Vec::new());
         }
-        pd.pending_comm_regs[vp] = dirty;
+        registers::merge_register_writes(&mut pd.pending_comm_regs[vp], dirty, |reg| {
+            write_set.is_set(*reg as u64)
+        });
         Ok(())
     }
 
@@ -978,6 +989,17 @@ impl Platform for ThemisPlatform {
                 (dst.0, dst.1 as usize),
             );
         }
+    }
+
+    fn handoff_vp(
+        &self,
+        context: &capability_engine::SwitchContext,
+        handoff: capability_engine::VpHandoff,
+    ) {
+        // SAFETY: the local monitor registered its current mutable VP
+        // reborrow before entering the engine; it does not access that VP
+        // while this engine-invoked callback is using it.
+        unsafe { crate::arch::complete_vp_handoff(self, context, handoff) }
     }
 
     // ── Register access (validation-only; actual VMCS writes batched by handler) ──

@@ -51,6 +51,13 @@ pub struct DomCapInfo {
     pub domain_id: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DoorbellCapInfo {
+    /// None denotes an endpoint beneath this recipient; Some is a held capability.
+    pub handle: Option<LocalHandle>,
+    pub doorbell: crate::Doorbell,
+}
+
 /// A GPA→HPA translation entry.
 #[derive(Debug, Clone)]
 pub struct PaMapInfo {
@@ -74,12 +81,14 @@ pub struct StructuredAttestation {
     pub mem_caps: Vec<MemCapInfo>,
     pub dom_caps: Vec<DomCapInfo>,
     pub pa_map: Vec<PaMapInfo>,
+    pub doorbells: Vec<DoorbellCapInfo>,
 }
 
 impl StructuredAttestation {
     /// Serialize to the binary wire format used by DomainComm.
     ///
-    /// Layout: `[header (40B)] [MemCapEntry * N] [DomCapEntry * N] [PaMapEntry * N]`
+    /// Layout: header, memory caps, domain caps, PA map, doorbell capabilities.
+    /// Flag bit 2 identifies this inventory; header offset 36 is its count.
     ///
     /// The header and entry types match `themis-abi::domcomm` exactly.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -92,13 +101,14 @@ impl StructuredAttestation {
         let total = hdr_size
             + self.mem_caps.len() * mem_entry_size
             + self.dom_caps.len() * dom_entry_size
-            + self.pa_map.len() * pa_entry_size;
+            + self.pa_map.len() * pa_entry_size
+            + self.doorbells.len() * 40;
 
         let mut buf = Vec::with_capacity(total);
 
         // Header fields (little-endian)
         buf.extend_from_slice(&self.domain_id.to_le_bytes());       // 0..8
-        buf.extend_from_slice(&self.flags.to_le_bytes());           // 8..12
+        buf.extend_from_slice(&(self.flags | 4).to_le_bytes());
         buf.extend_from_slice(&self.num_vps.to_le_bytes());         // 12..16
         buf.extend_from_slice(&self.api_flags.to_le_bytes());       // 16..20
         buf.extend_from_slice(&(self.mem_caps.len() as u32).to_le_bytes()); // 20..24
@@ -106,7 +116,7 @@ impl StructuredAttestation {
         buf.extend_from_slice(&(self.pa_map.len() as u32).to_le_bytes());   // 28..32
         buf.extend_from_slice(&0u16.to_le_bytes());                 // chunk_index 32..34
         buf.extend_from_slice(&1u16.to_le_bytes());                 // total_chunks 34..36
-        buf.extend_from_slice(&0u32.to_le_bytes());                 // reserved 36..40
+        buf.extend_from_slice(&(self.doorbells.len() as u32).to_le_bytes()); // 36..40
 
         // MemCapEntry[]
         for m in &self.mem_caps {
@@ -130,6 +140,20 @@ impl StructuredAttestation {
             buf.extend_from_slice(&p.hpa.to_le_bytes());
             buf.extend_from_slice(&p.size.to_le_bytes());
         }
+        for entry in &self.doorbells {
+                let doorbell = entry.doorbell;
+                let (kind, vp) = match doorbell.kind {
+                    crate::DoorbellKind::Sync => (0u8, 0),
+                    crate::DoorbellKind::Async { vp_id } => (1u8, vp_id),
+                };
+                buf.extend_from_slice(&doorbell.recipient.to_le_bytes());
+                buf.extend_from_slice(&doorbell.port_id.to_le_bytes());
+                buf.extend_from_slice(&entry.handle.unwrap_or(crate::SELF_CAPABILITY).to_le_bytes());
+                buf.extend_from_slice(&vp.to_le_bytes());
+                buf.push(doorbell.vector);
+                buf.push(kind);
+                buf.extend_from_slice(&[0; 6]);
+        }
 
         buf
     }
@@ -148,6 +172,9 @@ pub fn build_structured_attestation(
     let num_vps = domain.data.policy.num_vprocessors as u32;
     let api_flags = domain.data.policy.api.bits() as u32;
     let flags = if domain.data.is_sealed() { 1u32 } else { 0u32 };
+    let mut doorbells: Vec<DoorbellCapInfo> = domain.children.iter().filter_map(|child| {
+        child.read().doorbell_info().map(|doorbell| DoorbellCapInfo { handle: None, doorbell })
+    }).collect();
 
     // Memory capabilities with proper GPA lookup.
     let mem_caps: Vec<MemCapInfo> = domain
@@ -181,6 +208,12 @@ pub fn build_structured_attestation(
         .filter_map(|(handle, weak)| {
             let cap_ref = weak.upgrade()?;
             let c = cap_ref.read();
+            if let Some(doorbell) = c.doorbell_info() {
+                if !domain.data.is_domain_handle_frozen(*handle) {
+                    doorbells.push(DoorbellCapInfo { handle: Some(*handle), doorbell });
+                }
+                return None;
+            }
             Some(DomCapInfo {
                 handle: *handle,
                 domain_id: c.data.id,
@@ -213,6 +246,7 @@ pub fn build_structured_attestation(
         mem_caps,
         dom_caps,
         pa_map,
+        doorbells,
     }
 }
 

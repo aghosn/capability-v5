@@ -22,19 +22,27 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 
 /// Build a sealed child domain inside `parent`, returning `(child_ref, child_handle)`.
 /// Child gets `MonitorAPI::ALL` (includes SWITCH) and all 4 cores.
-fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
-    let platform = common::TestPlatform::new();
-    let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+fn make_sealed_child(platform: &common::TestPlatform, parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
+    make_child_with_policy(platform, parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+}
+
+fn make_child_with_policy(
+    platform: &common::TestPlatform,
+    parent: &CapabilityRef<Domain>,
+    policy: DomainPolicy,
+) -> (CapabilityRef<Domain>, LocalHandle) {
+    if parent.read().data.id == 0 {
+        platform.ensure_boot_memory(parent);
+    }
     let num_vps = policy.num_vprocessors;
-    let h = Capability::create(&platform, parent, policy).unwrap().0;
+    let h = Capability::create(platform, parent, policy).unwrap().0;
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();
-    // Explicitly add VPs (no longer auto-created in Domain::new)
-    for _ in 0..num_vps {
-        child.write().data.add_vprocessor().unwrap();
-    }
-    Capability::seal(&platform, parent, h).unwrap();
+    common::add_test_vps(platform, parent, h, num_vps);
+    let pool_size = 0x100_0000 >> child.read().depth;
+    common::delegate_test_memory(platform, parent, h, pool_size);
+    Capability::seal(platform, parent, h).unwrap();
     (child, h)
 }
 
@@ -44,6 +52,12 @@ fn fixture() -> (
     CapabilityRef<Domain>,
     LocalHandle,
     common::TestPlatform,
+) {
+    fixture_with_child_policy(DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+}
+
+fn fixture_with_child_policy(policy: DomainPolicy) -> (
+    CapabilityRef<Domain>, CapabilityRef<Domain>, LocalHandle, common::TestPlatform,
 ) {
     let platform = common::TestPlatform::new();
 
@@ -56,11 +70,674 @@ fn fixture() -> (
     // VP[0] of root is Running on core 0
     init_vp_running(&root, 0, 0);
 
-    let (child, child_h) = make_sealed_child(&root);
+    let (child, child_h) = make_child_with_policy(&platform, &root, policy);
     let child_id = child.read().data.id;
     platform.register_domain(child_id, Some(root_id));
 
     (root, child, child_h, platform)
+}
+
+#[test]
+fn vp_exit_discards_revoked_source_replaced_while_acquiring_lock() {
+    let (root, child, child_h, platform) = fixture();
+    let platform = Arc::new(platform);
+    Capability::switch(&*platform, &root, child_h, 0).unwrap();
+    let binding = platform
+        .switch_manager()
+        .get_core(0)
+        .unwrap()
+        .current_binding()
+        .unwrap();
+    let revoke_platform = platform.clone();
+    let revoke_root = root.clone();
+    platform.before_next_shared_lock(move || {
+        Capability::revoke_domain(&*revoke_platform, &revoke_root, child_h).unwrap();
+    });
+
+    let result = Capability::with_vp_exit(&*platform, &binding, |_| -> Result<()> {
+        panic!("revoked VP exit must not execute on its surviving caller");
+    })
+    .unwrap();
+    assert!(result.is_none());
+    assert!(child.read().data.is_revoked());
+    let active = platform
+        .switch_manager()
+        .get_core(0)
+        .unwrap()
+        .current_binding()
+        .unwrap();
+    assert!(Arc::ptr_eq(&active.domain, &root));
+    assert_eq!(active.vp_id, 0);
+    assert!(!platform.operation_lock_is_held());
+}
+
+#[test]
+fn vp_exit_discards_exit_when_same_domain_has_a_different_active_vp() {
+    let (root, child, child_h, platform) = fixture();
+    let platform = Arc::new(platform);
+    Capability::switch(&*platform, &root, child_h, 0).unwrap();
+    let binding = platform
+        .switch_manager()
+        .get_core(0)
+        .unwrap()
+        .current_binding()
+        .unwrap();
+    let switch_platform = platform.clone();
+    let switch_root = root.clone();
+    let switch_child = child.clone();
+    platform.before_next_shared_lock(move || {
+        Capability::switch_return_with_exit(&*switch_platform, &switch_child, 10).unwrap();
+        Capability::switch(&*switch_platform, &switch_root, child_h, 1).unwrap();
+    });
+
+    let result = Capability::with_vp_exit(&*platform, &binding, |_| -> Result<()> {
+        panic!("old exit must not execute on another VP of the same domain");
+    })
+    .unwrap();
+    assert!(result.is_none());
+    let active = platform
+        .switch_manager()
+        .get_core(0)
+        .unwrap()
+        .current_binding()
+        .unwrap();
+    assert!(Arc::ptr_eq(&active.domain, &child));
+    assert_eq!(active.vp_id, 1);
+}
+
+#[test]
+fn vp_exit_keeps_policy_runtime_write_and_return_handoff_under_one_lock() {
+    let (root, _, _, platform) = fixture();
+    let platform = Arc::new(platform);
+    let child_h = Capability::create(
+        &*platform,
+        &root,
+        DomainPolicy::new_restricted(3, MonitorAPI::ALL),
+    )
+    .unwrap()
+    .0;
+    common::add_test_vps(&*platform, &root, child_h, 2);
+    for (id, value) in [
+        (
+            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, 0x123, 0, 0),
+            7,
+        ),
+        (
+            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Cpuid, 7, 0, 0),
+            42 << 32,
+        ),
+        (PolicyIdentifier::ExitReasonTrap(10), 1),
+    ] {
+        Capability::set_policy_scoped(&*platform, &root, child_h, PolicyScope::Vp(1), id, value)
+            .unwrap();
+    }
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    Capability::seal(&*platform, &root, child_h).unwrap();
+    Capability::switch(&*platform, &root, child_h, 1).unwrap();
+    let binding = platform
+        .switch_manager()
+        .get_core(0)
+        .unwrap()
+        .current_binding()
+        .unwrap();
+    let handoff_platform = Arc::downgrade(&platform);
+    platform.set_handoff_hook(move |_, handoff| {
+        assert!(matches!(
+            handoff,
+            VpHandoff::Return {
+                exit_reason: Some(10),
+                ..
+            }
+        ));
+        assert!(handoff_platform.upgrade().unwrap().operation_lock_is_held());
+    });
+    Capability::with_vp_exit(&*platform, &binding, |exit| {
+        assert!(platform.operation_lock_is_held());
+        assert!(matches!(
+            exit.cpuid_action(7, 0),
+            FeatureAction::Emulate(CpuidResult { v0: 42, .. })
+        ));
+        assert!(exit.exit_action(10).trap);
+        assert!(matches!(exit.msr_action(0x123), FeatureAction::Emulate(7)));
+        exit.update_msr_emulate_value(0x123, 99)?;
+        assert!(matches!(exit.msr_action(0x123), FeatureAction::Emulate(99)));
+        assert_eq!(
+            exit.update_msr_emulate_value(0x124, 99).unwrap_err(),
+            CapaError::NotFound
+        );
+        exit.forward(10)?;
+        Ok(())
+    })
+    .unwrap()
+    .unwrap();
+    assert!(!platform.operation_lock_is_held());
+    assert_eq!(platform.get_core_domain(0), Some(root.read().data.id));
+    assert!(matches!(
+        child.read().data.policy.msrs_for(1).action(&0x123),
+        FeatureAction::Emulate(7)
+    ));
+}
+
+#[test]
+fn vp_exit_keeps_interrupt_policy_and_handoff_under_one_lock() {
+    let (root, _, child_h, platform) = fixture();
+    let platform = Arc::new(platform);
+    Capability::switch(&*platform, &root, child_h, 0).unwrap();
+    let binding = platform
+        .switch_manager()
+        .get_core(0)
+        .unwrap()
+        .current_binding()
+        .unwrap();
+    let handoff_platform = Arc::downgrade(&platform);
+    platform.set_handoff_hook(move |_, handoff| {
+        assert!(matches!(handoff, VpHandoff::Interrupt { vector: 0x80, .. }));
+        assert!(handoff_platform.upgrade().unwrap().operation_lock_is_held());
+    });
+    Capability::with_vp_exit(&*platform, &binding, |exit| {
+        assert!(platform.operation_lock_is_held());
+        assert_ne!(
+            exit.interrupt_action(0x80).visibility,
+            InterruptVisibility::Deliver
+        );
+        exit.deliver_interrupt(0x80)?;
+        Ok(())
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(platform.get_core_domain(0), Some(root.read().data.id));
+    assert!(!platform.operation_lock_is_held());
+}
+
+#[test]
+fn vp_exit_callback_error_releases_operation_lock() {
+    let (_, _, _, platform) = fixture();
+    let binding = platform
+        .switch_manager()
+        .get_core(0)
+        .unwrap()
+        .current_binding()
+        .unwrap();
+    let result = Capability::with_vp_exit(&platform, &binding, |_| -> Result<()> {
+        assert!(platform.operation_lock_is_held());
+        Err(CapaError::NotSupported)
+    });
+    assert_eq!(result.unwrap_err(), CapaError::NotSupported);
+    assert!(!platform.operation_lock_is_held());
+}
+
+#[test]
+fn generic_ownership_discovers_offers_and_preserves_domain_revoke_authority() {
+    let (root, child, child_h, platform) = fixture();
+    let (doorbell, port) = Capability::create_doorbell(
+        &platform, &root, None, 0x90, DoorbellKind::Async { vp_id: 0 },
+    ).unwrap();
+    let channel = Capability::get_chan_self(&platform, &root).unwrap().0;
+    assert!(matches!(Capability::revoke(&platform, &root, doorbell, 0),
+        Err(CapaError::ApiNotAllowed)));
+    Capability::send(&platform, &root, doorbell, child_h, Attributes::NONE).unwrap();
+    Capability::send(&platform, &root, channel, child_h, Attributes::NONE).unwrap();
+    let first = Capability::enumerate_pending(&platform, &child, 0).unwrap().unwrap();
+    let second = Capability::enumerate_pending(&platform, &child, first + 1).unwrap().unwrap();
+    assert!(second > first);
+    assert_eq!(Capability::enumerate_pending(&platform, &child, second + 1).unwrap(), None);
+    Capability::revoke(&platform, &root, SELF_CAPABILITY, port).unwrap();
+    assert_eq!(Capability::enumerate_pending(&platform, &child, 0).unwrap(), Some(second));
+    Capability::reject(&platform, &child, second).unwrap();
+    assert_eq!(Capability::enumerate_pending(&platform, &child, 0).unwrap(), None);
+    let (restricted, _) = make_child_with_policy(&platform, &root,
+        DomainPolicy::new_restricted(0b1111,
+            MonitorAPI::from_bits(MonitorAPI::ALL.bits() & !MonitorAPI::ENUMERATE)));
+    assert!(matches!(Capability::enumerate_pending(&platform, &restricted, 0),
+        Err(CapaError::ApiNotAllowed)));
+    Capability::revoke(&platform, &root, child_h, 0).unwrap();
+    assert!(child.read().data.is_revoked());
+    assert!(!root.read().data.domain_capabilities.contains_key(&child_h));
+}
+
+#[test]
+fn doorbell_sync_unwinds_to_recipient_past_another_deliver_handler_and_resumes() {
+    let mut policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    policy.interrupts.set_policy(0x91, VectorPolicy::default_deliver());
+    let (root, middle, middle_h, platform) = fixture_with_child_policy(policy.clone());
+    let (leaf, leaf_h) = make_child_with_policy(&platform, &middle, policy);
+    platform.register_domain(leaf.read().data.id, Some(middle.read().data.id));
+    let (handle, port) = Capability::create_doorbell(
+        &platform, &root, None, 0x91, DoorbellKind::Sync,
+    ).unwrap();
+    // Both intervening domains also Deliver this vector: the endpoint,
+    // rather than the first Deliver policy, must select the recipient.
+    let leaf_endpoint = {
+        Capability::send(&platform, &root, handle, middle_h, Attributes::NONE).unwrap();
+        let pending = *middle.read().data.pending_domain_capabilities.keys().next().unwrap();
+        let handle = Capability::accept(&platform, &middle, pending).unwrap().0;
+        Capability::send(&platform, &middle, handle, leaf_h, Attributes::NONE).unwrap();
+        let pending = *leaf.read().data.pending_domain_capabilities.keys().next().unwrap();
+        Capability::accept(&platform, &leaf, pending).unwrap().0
+    };
+    Capability::switch(&platform, &root, middle_h, 1).unwrap();
+    Capability::switch(&platform, &middle, leaf_h, 2).unwrap();
+    let context = Capability::notify(&platform, &leaf, leaf_endpoint, 42).unwrap().unwrap();
+    assert!(Arc::ptr_eq(&context.to_domain, &root));
+    assert_eq!(context.to_vp_id, Some(0));
+    assert!(matches!(*root.read().data.policy.vprocessor_states[0].run_state.read(),
+        VpRunState::Running { core: 0 }));
+    assert!(matches!(*middle.read().data.policy.vprocessor_states[1].run_state.read(),
+        VpRunState::Waiting { unlocks: Some(_), blocked: false, .. }));
+    assert!(matches!(*leaf.read().data.policy.vprocessor_states[2].run_state.read(),
+        VpRunState::Waiting { unlocks: None, blocked: true, .. }));
+    let event = platform.doorbells.lock()[0];
+    assert_eq!((event.doorbell.port_id, event.value, event.source_vp), (port, 42, 2));
+    assert!(platform.pending_interrupts.lock().contains(&(root.read().data.id, 0, 0x91)));
+    let context = Capability::switch(&platform, &root, middle_h, 1).unwrap().0;
+    assert!(Arc::ptr_eq(&context.to_domain, &leaf));
+    assert!(matches!(*middle.read().data.policy.vprocessor_states[1].run_state.read(),
+        VpRunState::Locked { .. }));
+}
+
+#[test]
+fn doorbell_sync_failure_is_atomic_and_reclaim_destroys_pending_or_held_objects() {
+    let (root, child, child_h, platform) = fixture();
+    let (handle, port) = Capability::create_doorbell(
+        &platform, &root, None, 0x92, DoorbellKind::Sync,
+    ).unwrap();
+    Capability::send(&platform, &root, handle, child_h, Attributes::NONE).unwrap();
+    Capability::revoke(&platform, &root, SELF_CAPABILITY, port).unwrap();
+    assert!(child.read().data.pending_domain_capabilities.is_empty());
+    assert!(!root.read().data.domain_capabilities.contains_key(&handle));
+
+    let (handle, port2) = Capability::create_doorbell(
+        &platform, &root, None, 0x92, DoorbellKind::Sync,
+    ).unwrap();
+    assert_ne!(port, port2);
+    Capability::send(&platform, &root, handle, child_h, Attributes::NONE).unwrap();
+    let pending = *child.read().data.pending_domain_capabilities.keys().next().unwrap();
+    let received = Capability::accept(&platform, &child, pending).unwrap().0;
+    Capability::switch(&platform, &root, child_h, 0).unwrap();
+    platform.notification_full.store(true, std::sync::atomic::Ordering::Release);
+    assert!(matches!(Capability::notify(&platform, &child, received, 5),
+        Err(CapaError::NotificationQueueFull)));
+    assert!(platform.doorbells.lock().is_empty());
+    assert!(platform.pending_interrupts.lock().is_empty());
+    assert!(matches!(*root.read().data.policy.vprocessor_states[0].run_state.read(),
+        VpRunState::Locked { .. }));
+    assert!(matches!(*child.read().data.policy.vprocessor_states[0].run_state.read(),
+        VpRunState::Running { core: 0 }));
+    Capability::switch(&platform, &child, 0, 0).unwrap();
+    Capability::revoke(&platform, &root, SELF_CAPABILITY, port2).unwrap();
+    assert!(!child.read().data.domain_capabilities.contains_key(&received));
+    assert!(Capability::notify(&platform, &child, received, 5).is_err());
+}
+
+#[test]
+fn doorbell_async_targets_its_vp_without_unwinding_and_sync_rejects_self() {
+    let mut policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    policy.interrupts.set_policy(0x94, VectorPolicy::default_deliver());
+    let (root, child, child_h, platform) = fixture_with_child_policy(policy);
+    let (handle, _) = Capability::create_doorbell(
+        &platform, &root, None, 0x93, DoorbellKind::Async { vp_id: 3 },
+    ).unwrap();
+    Capability::send(&platform, &root, handle, child_h, Attributes::NONE).unwrap();
+    let pending = *child.read().data.pending_domain_capabilities.keys().next().unwrap();
+    let received = Capability::accept(&platform, &child, pending).unwrap().0;
+    Capability::switch(&platform, &root, child_h, 0).unwrap();
+    assert!(Capability::notify(&platform, &child, received, 17).unwrap().is_none());
+    assert_eq!(platform.doorbells.lock()[0].recipient_vp, 3);
+    assert!(platform.pending_interrupts.lock().contains(&(0, 3, 0x93)));
+    assert!(matches!(*child.read().data.policy.vprocessor_states[0].run_state.read(),
+        VpRunState::Running { core: 0 }));
+
+    let (own, _) = Capability::create_doorbell(
+        &platform, &child, None, 0x94, DoorbellKind::Sync,
+    ).unwrap();
+    assert!(Capability::notify(&platform, &child, own, 18).is_err());
+    assert_eq!(platform.doorbells.lock().len(), 1);
+}
+
+#[test]
+fn doorbell_creation_checks_permissions_and_effective_policy_and_has_no_domain_authority() {
+    let (root, _child, child_h, platform) = fixture();
+    assert!(matches!(Capability::create_doorbell(
+        &platform, &root, Some(child_h), 0x95, DoorbellKind::Sync),
+        Err(CapaError::DomainSealed)));
+    assert!(Capability::create_doorbell(
+        &platform, &root, None, 0x95, DoorbellKind::Async { vp_id: 99 }).is_err());
+    let recipient_h = Capability::create(&platform, &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL)).unwrap().0;
+    common::add_test_vps(&platform, &root, recipient_h, 1);
+    Capability::set_policy(&platform, &root, recipient_h,
+        PolicyIdentifier::VectorVisibility(0x95), 0).unwrap();
+    Capability::set_policy(&platform, &root, recipient_h,
+        PolicyIdentifier::VectorInjectable(0x95), 0).unwrap();
+    assert!(Capability::create_doorbell(
+        &platform, &root, Some(recipient_h), 0x95, DoorbellKind::Sync).is_err());
+    Capability::set_policy(&platform, &root, recipient_h,
+        PolicyIdentifier::VectorInjectable(0x95), 1).unwrap();
+    Capability::set_policy(&platform, &root, recipient_h,
+        PolicyIdentifier::VectorVisibility(0x95), 2).unwrap();
+    assert!(Capability::create_doorbell(
+        &platform, &root, Some(recipient_h), 0x95, DoorbellKind::Sync).is_err());
+    let (handle, _) = Capability::create_doorbell(
+        &platform, &root, None, 0x96, DoorbellKind::Async { vp_id: 0 },
+    ).unwrap();
+    assert!(Capability::set_policy(&platform, &root, handle,
+        PolicyIdentifier::ApiMonitor, MonitorAPI::ALL.bits().into()).is_err());
+    assert!(Capability::seal(&platform, &root, handle).is_err());
+    assert!(Capability::revoke_domain(&platform, &root, handle).is_err());
+    assert!(Capability::switch(&platform, &root, handle, 0).is_err());
+    assert!(Capability::send(&platform, &root, handle, handle, Attributes::NONE).is_err());
+    let (restricted, _) = make_child_with_policy(&platform, &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE));
+    assert!(Capability::create_doorbell(
+        &platform, &restricted, None, 0x96, DoorbellKind::Sync).is_err());
+}
+
+#[test]
+fn doorbell_attestation_excludes_pending_transfer_authority() {
+    let (root, child, child_h, platform) = fixture();
+    let (handle, port) = Capability::create_doorbell(
+        &platform, &root, None, 0x98, DoorbellKind::Sync,
+    ).unwrap();
+    Capability::send(&platform, &root, handle, child_h, Attributes::NONE).unwrap();
+    let pending = Capability::enumerate_pending(&platform, &child, 0).unwrap().unwrap();
+    let report = Capability::attest_self_structured(&platform, &root).unwrap().0;
+    assert_eq!(report.doorbells.len(), 1);
+    assert_eq!(report.doorbells[0].handle, None);
+    assert_eq!(report.doorbells[0].doorbell.port_id, port);
+    assert!(Capability::attest_self_structured(&platform, &child).unwrap().0.doorbells.is_empty());
+    Capability::reject(&platform, &child, pending).unwrap();
+    assert!(Capability::attest_self_structured(&platform, &root).unwrap().0.doorbells.iter()
+        .any(|entry| entry.handle == Some(handle)));
+    Capability::send(&platform, &root, handle, child_h, Attributes::NONE).unwrap();
+    let pending = Capability::enumerate_pending(&platform, &child, 0).unwrap().unwrap();
+    let received = Capability::accept(&platform, &child, pending).unwrap().0;
+    let report = Capability::attest_self_structured(&platform, &child).unwrap().0;
+    assert_eq!(report.doorbells.len(), 1);
+    assert_eq!(report.doorbells[0].handle, Some(received));
+    assert_eq!(report.doorbells[0].doorbell.port_id, port);
+}
+
+#[test]
+fn doorbell_vp_override_cannot_preserve_stale_injection_authority() {
+    let platform = common::TestPlatform::new();
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let child_h = Capability::create(&platform, &root,
+        DomainPolicy::new_restricted(15, MonitorAPI::ALL)).unwrap().0;
+    platform.ensure_boot_memory(&root);
+    common::add_test_vps(&platform, &root, child_h, 1);
+    Capability::set_policy_scoped(&platform, &root, child_h, PolicyScope::Vp(0),
+        PolicyIdentifier::VectorVisibility(0x99), 0).unwrap();
+    Capability::set_policy(&platform, &root, child_h,
+        PolicyIdentifier::VectorInjectable(0x99), 0).unwrap();
+    for kind in [DoorbellKind::Sync, DoorbellKind::Async { vp_id: 0 }] {
+        assert!(matches!(Capability::create_doorbell(
+            &platform, &root, Some(child_h), 0x99, kind),
+            Err(CapaError::PermissionDenied)));
+    }
+    Capability::set_policy(&platform, &root, child_h,
+        PolicyIdentifier::VectorInjectable(0x99), 1).unwrap();
+    let (_, port) = Capability::create_doorbell(
+        &platform, &root, Some(child_h), 0x99, DoorbellKind::Async { vp_id: 0 },
+    ).unwrap();
+    assert!(matches!(Capability::set_policy(&platform, &root, child_h,
+        PolicyIdentifier::VectorInjectable(0x99), 0),
+        Err(CapaError::PermissionDenied)));
+    Capability::revoke(&platform, &root, child_h, port).unwrap();
+    Capability::set_policy(&platform, &root, child_h,
+        PolicyIdentifier::VectorInjectable(0x99), 0).unwrap();
+}
+
+#[test]
+fn doorbell_child_provisioning_attestation_and_policy_changes_follow_the_tree() {
+    let platform = common::TestPlatform::new();
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let child_h = Capability::create(&platform, &root,
+        DomainPolicy::new_restricted(15, MonitorAPI::ALL)).unwrap().0;
+    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
+    platform.ensure_boot_memory(&root);
+    common::add_test_vps(&platform, &root, child_h, 1);
+    Capability::set_policy(&platform, &root, child_h,
+        PolicyIdentifier::VectorVisibility(0x97), 0).unwrap();
+    let (handle, port) = Capability::create_doorbell(
+        &platform, &root, Some(child_h), 0x97, DoorbellKind::Async { vp_id: 0 },
+    ).unwrap();
+    assert!(matches!(Capability::attest_structured(&platform, &root, child_h),
+        Err(CapaError::DomainNotSealed)));
+    assert!(Capability::set_policy(&platform, &root, child_h,
+        PolicyIdentifier::VectorVisibility(0x97), 2).is_err());
+    Capability::seal(&platform, &root, child_h).unwrap();
+    let recipient_report = Capability::attest_structured(&platform, &root, child_h).unwrap().0;
+    assert_eq!(recipient_report.doorbells.len(), 1);
+    assert!(recipient_report.doorbells[0].handle.is_none());
+    assert_eq!(recipient_report.doorbells[0].doorbell.port_id, port);
+    let bytes = recipient_report.to_bytes();
+    assert_eq!(bytes.len(), 80);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()) & 6, 4);
+    assert_eq!(u32::from_le_bytes(bytes[36..40].try_into().unwrap()), 1);
+    assert_eq!(u64::from_le_bytes(bytes[40..48].try_into().unwrap()), child.read().data.id);
+    assert_eq!(u64::from_le_bytes(bytes[48..56].try_into().unwrap()), port);
+    assert_eq!(u64::from_le_bytes(bytes[56..64].try_into().unwrap()), SELF_CAPABILITY);
+    let holder_report = Capability::attest_self_structured(&platform, &root).unwrap().0;
+    assert_eq!(holder_report.doorbells[0].handle, Some(handle));
+    let bytes = holder_report.to_bytes();
+    let entry = bytes.len() - 40;
+    assert_eq!(u64::from_le_bytes(bytes[entry + 16..entry + 24].try_into().unwrap()), handle);
+    Capability::revoke(&platform, &root, child_h, port).unwrap();
+    assert!(Capability::attest_structured(&platform, &root, child_h).unwrap().0.doorbells.is_empty());
+    assert!(Capability::attest_self_structured(&platform, &root).unwrap().0.doorbells.is_empty());
+    let replacement_h = Capability::create(&platform, &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL)).unwrap().0;
+    common::add_test_vps(&platform, &root, replacement_h, 1);
+    Capability::set_policy(&platform, &root, replacement_h,
+        PolicyIdentifier::VectorVisibility(0x97), 0).unwrap();
+    let (_, replacement_port) = Capability::create_doorbell(&platform, &root,
+        Some(replacement_h), 0x97, DoorbellKind::Async { vp_id: 0 }).unwrap();
+    Capability::revoke(&platform, &root, replacement_h, replacement_port).unwrap();
+    Capability::set_policy(&platform, &root, replacement_h,
+        PolicyIdentifier::VectorVisibility(0x97), 2).unwrap();
+}
+
+fn assert_handoff_blocks_cross_core_claim(interrupt: bool) {
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    let (root, child, child_h, platform) = fixture();
+    init_vp_running(&root, 1, 1);
+    platform.set_core_context(1, &root, 1);
+    Capability::switch(&platform, &root, child_h, 0).unwrap();
+
+    let expected_read_set = if interrupt {
+        child
+            .read()
+            .data
+            .policy
+            .interrupts_for(0)
+            .get_policy(32)
+            .read_set
+    } else {
+        child
+            .read()
+            .data
+            .policy
+            .exits_for(0)
+            .get_action(55)
+            .read_set
+    };
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    platform.set_handoff_hook(move |context, handoff| {
+        let read_set = match handoff {
+            VpHandoff::Call => return,
+            VpHandoff::Return {
+                exit_reason,
+                read_set,
+            } => {
+                assert!(!interrupt);
+                assert_eq!(exit_reason, Some(55));
+                read_set
+            }
+            VpHandoff::Interrupt { vector, read_set } => {
+                assert!(interrupt);
+                assert_eq!(vector, 32);
+                read_set
+            }
+        };
+        assert_eq!(read_set, expected_read_set);
+        let source = context.from_domain.as_ref().unwrap();
+        let source_vp = source.read().data.policy.vprocessor_states[0].clone();
+        let target_vp = context.to_domain.read().data.policy.vprocessor_states[0].clone();
+        assert!(matches!(
+            *source_vp.run_state.read(),
+            VpRunState::Running { core: 0 }
+        ));
+        assert!(matches!(
+            *target_vp.run_state.read(),
+            VpRunState::Locked { callee_domain_id, callee_vp_id: 0 }
+                if callee_domain_id == source.read().data.id
+        ));
+        entered_tx.send(()).unwrap();
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+    });
+
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            platform.set_current_core(Some(0));
+            if interrupt {
+                Capability::deliver_interrupt_vp(&platform, &child, 0, 32).map(|_| ())
+            } else {
+                Capability::switch_return_with_exit(&platform, &child, 55).map(|_| ())
+            }
+        });
+        entered_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        let binding_during_save = platform.get_core_domain(0);
+        platform.set_current_core(Some(1));
+        let during_save = Capability::switch(&platform, &root, child_h, 0);
+        release_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(binding_during_save, Some(child.read().data.id));
+        assert!(
+            during_save.is_err(),
+            "another core claimed hardware before save completed"
+        );
+    });
+
+    assert_eq!(platform.get_core_domain(0), Some(root.read().data.id));
+    Capability::switch(&platform, &root, child_h, 0).unwrap();
+    assert!(matches!(
+        *child.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Running { core: 1 }
+    ));
+}
+
+#[test]
+fn test_return_handoff_blocks_cross_core_claim_until_hardware_saved() {
+    assert_handoff_blocks_cross_core_claim(false);
+}
+
+#[test]
+fn test_interrupt_handoff_blocks_cross_core_claim_until_hardware_saved() {
+    assert_handoff_blocks_cross_core_claim(true);
+}
+
+#[test]
+fn test_wrong_core_interrupt_never_hands_off_or_partially_unwinds() {
+    let (root, middle, middle_h, platform) = fixture();
+    let (leaf, leaf_h) = make_sealed_child(&platform, &middle);
+    Capability::switch(&platform, &root, middle_h, 0).unwrap();
+    Capability::switch(&platform, &middle, leaf_h, 0).unwrap();
+    platform.set_current_core(Some(1));
+    platform.set_handoff_hook(|_, _| panic!("invalid chain reached hardware handoff"));
+
+    assert!(Capability::deliver_interrupt_vp(&platform, &leaf, 0, 32).is_err());
+    assert!(matches!(
+        *leaf.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Running { core: 0 }
+    ));
+    assert!(matches!(
+        *root.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Locked { .. }
+    ));
+    let core = platform.switch_manager().get_core(0).unwrap();
+    assert_eq!(core.current_domain(), Some(leaf.read().data.id));
+    assert_eq!(core.peek_at(0).unwrap().domain_id, middle.read().data.id);
+    assert_eq!(core.peek_at(1).unwrap().domain_id, root.read().data.id);
+}
+
+#[test]
+fn test_invalid_return_never_hands_off() {
+    let (root, _, _, platform) = fixture();
+    platform.set_handoff_hook(|_, _| panic!("invalid return reached hardware handoff"));
+    assert!(Capability::switch_return_with_exit(&platform, &root, 55).is_err());
+    assert!(matches!(
+        *root.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Running { core: 0 }
+    ));
+}
+
+#[test]
+fn test_return_rejects_mismatched_platform_binding_before_handoff() {
+        let (root, middle, middle_h, platform) = fixture();
+        let (leaf, leaf_h) = make_sealed_child(&platform, &middle);
+        Capability::switch(&platform, &root, middle_h, 0).unwrap();
+        Capability::switch(&platform, &middle, leaf_h, 0).unwrap();
+        platform.set_core_context(0, &middle, 0);
+        platform.set_handoff_hook(|_, _| panic!("invalid return reached hardware handoff"));
+
+        assert!(Capability::switch_return_with_exit(&platform, &leaf, 55).is_err());
+        assert!(matches!(
+            *leaf.read().data.policy.vprocessor_states[0]
+                .run_state
+                .read(),
+            VpRunState::Running { core: 0 }
+        ));
+        assert!(matches!(
+            *middle.read().data.policy.vprocessor_states[0]
+                .run_state
+                .read(),
+            VpRunState::Locked { .. }
+        ));
+        assert_eq!(
+            platform
+                .switch_manager()
+                .get_core(0)
+                .unwrap()
+                .peek_at(1)
+                .unwrap()
+                .domain_id,
+            root.read().data.id,
+        );
+}
+
+#[test]
+fn test_local_deliver_interrupt_does_not_handoff() {
+    let (root, _, _, platform) = fixture();
+    platform.set_handoff_hook(|_, _| panic!("local Deliver must not swap the active VP"));
+    let (context, _) = Capability::deliver_interrupt_vp(&platform, &root, 0, 32).unwrap();
+    assert!(Arc::ptr_eq(
+        &context.interrupted_domain,
+        &context.handler_domain
+    ));
+    assert!(matches!(
+        *root.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Running { core: 0 }
+    ));
 }
 
 // ── CoreContext infrastructure tests (unchanged) ─────────────────────────────
@@ -256,7 +933,7 @@ fn test_vp_switch_no_vp_running_on_core() {
     // VP[0] stays Available — not Running
     platform.set_current_core(Some(0));
 
-    let (_, child_h) = make_sealed_child(&root);
+    let (_, child_h) = make_sealed_child(&platform, &root);
 
     let result = Capability::switch(&platform, &root, child_h, 0);
     assert!(result.is_err(), "expected error when no VP running on core");
@@ -567,6 +1244,12 @@ fn setup_3domain_chain() -> (
     CapabilityRef<Domain>,
     common::TestPlatform,
 ) {
+    setup_3domain_chain_with_policy(VectorPolicy::default_not_report())
+}
+
+fn setup_3domain_chain_with_policy(middle_policy: VectorPolicy) -> (
+    CapabilityRef<Domain>, CapabilityRef<Domain>, CapabilityRef<Domain>, common::TestPlatform,
+) {
     let platform = common::TestPlatform::new();
     platform.set_current_core(Some(0));
 
@@ -578,29 +1261,18 @@ fn setup_3domain_chain() -> (
     init_vp_running(&dom0, 0, 0);
 
     // dom1: child of dom0, REPORT policy — intermediate
-    let (dom1, dom1_h) = make_sealed_child(&dom0);
+    let mut policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    policy.interrupts.set_policy(0, middle_policy);
+    let (dom1, dom1_h) = make_child_with_policy(&platform, &dom0, policy);
     let dom1_id = dom1.read().data.id;
     platform.register_domain(dom1_id, Some(dom0_id));
 
     // dom0 switches to dom1: dom0.vp0 → Locked, dom1.vp0 → Running
     Capability::switch(&platform, &dom0, dom1_h, 0).unwrap().0;
 
-    // dom2: child of dom0 (visible from dom1 via parent's domain cap), sealed
-    // For simplicity, create dom2 as a child of dom0, give dom1 a handle to it.
-    // In a real system dom1 would have its own capability; here we test the VP
-    // chain semantics directly.
-    let (dom2, _dom2_h_in_dom0) = make_sealed_child(&dom0);
+    let (dom2, dom2_h_in_dom1) = make_sealed_child(&platform, &dom1);
     let dom2_id = dom2.read().data.id;
-    platform.register_domain(dom2_id, Some(dom0_id));
-
-    // Manually add a handle for dom2 in dom1 so dom1 can switch to dom2.
-    let dom2_h_in_dom1 = {
-        let dom2_weak = Arc::downgrade(&dom2);
-        let mut d1 = dom1.write();
-        let h = d1.data.allocate_domain_handle();
-        d1.data.add_domain_capability(h, dom2_weak);
-        h
-    };
+    platform.register_domain(dom2_id, Some(dom1_id));
 
     // dom1 switches to dom2: dom1.vp0 → Locked, dom2.vp0 → Running
     Capability::switch(&platform, &dom1, dom2_h_in_dom1, 0)
@@ -718,8 +1390,7 @@ fn test_deliver_interrupt_vp_3domain() {
 /// claimable whenever dom1 itself later targets it.
 #[test]
 fn test_interrupt_resume_leaves_untouched_callee_waiting() {
-    let (dom0, dom1, dom2, platform) = setup_3domain_chain();
-    set_vector_policy(&dom1, 0, VectorPolicy::default_report());
+    let (dom0, dom1, dom2, platform) = setup_3domain_chain_with_policy(VectorPolicy::default_report());
 
     let dom0_id = dom0.read().data.id;
     let dom1_id = dom1.read().data.id;
@@ -815,13 +1486,12 @@ fn test_interrupt_resume_leaves_untouched_callee_waiting() {
 /// actually resumes.
 #[test]
 fn test_interrupt_resume_not_report_skips_to_callee() {
-    let (dom0, dom1, dom2, platform) = setup_3domain_chain();
+    let (dom0, dom1, dom2, platform) = setup_3domain_chain_with_policy(not_report_policy());
     let dom1_id = dom1.read().data.id;
     let dom2_id = dom2.read().data.id;
 
     // Make dom1's policy for vector 0 NotReport, so switching to dom1
     // transparently collapses down to its callee (dom2).
-    set_vector_policy(&dom1, 0, not_report_policy());
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0)
         .unwrap()
@@ -911,8 +1581,7 @@ fn test_deliver_interrupt_vp_no_vp_on_core() {
 /// stays gated until its own caller resumes.
 #[test]
 fn test_waiting_vp_resumable_by_different_vp_same_domain() {
-    let (dom0, dom1, dom2, platform) = setup_3domain_chain();
-    set_vector_policy(&dom1, 0, VectorPolicy::default_report());
+    let (dom0, dom1, dom2, platform) = setup_3domain_chain_with_policy(VectorPolicy::default_report());
     let dom1_id = dom1.read().data.id;
 
     // Deliver interrupt: dom0 is handler, dom2.vp0 → Waiting{unlocks:None},
@@ -987,8 +1656,7 @@ fn test_waiting_vp_resumable_by_different_vp_same_domain() {
 /// does dom2 become claimable by dom1.vp1.
 #[test]
 fn test_deep_waiting_vp_blocked_until_caller_resumes() {
-    let (dom0, dom1, dom2, platform) = setup_3domain_chain();
-    set_vector_policy(&dom1, 0, VectorPolicy::default_report());
+    let (dom0, dom1, dom2, platform) = setup_3domain_chain_with_policy(VectorPolicy::default_report());
     let dom0_id = dom0.read().data.id;
     let dom1_id = dom1.read().data.id;
     let dom2_id = dom2.read().data.id;
@@ -1087,6 +1755,13 @@ fn setup_4domain_chain() -> (
     CapabilityRef<Domain>,
     common::TestPlatform,
 ) {
+    setup_4domain_chain_with_policy(0, std::array::from_fn(|_| VectorPolicy::default_not_report()))
+}
+
+fn setup_4domain_chain_with_policy(vector: u8, policies: [VectorPolicy; 3]) -> (
+    CapabilityRef<Domain>, CapabilityRef<Domain>, CapabilityRef<Domain>,
+    CapabilityRef<Domain>, common::TestPlatform,
+) {
     let platform = common::TestPlatform::new();
     platform.set_current_core(Some(0));
 
@@ -1096,35 +1771,27 @@ fn setup_4domain_chain() -> (
     platform.set_core_context(0, &dom0, 0);
     init_vp_running(&dom0, 0, 0);
 
-    let (dom1, dom1_h) = make_sealed_child(&dom0);
+    let child_policy = |interrupts| {
+        let mut policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+        policy.interrupts.set_policy(vector, interrupts);
+        policy
+    };
+    let [policy1, policy2, policy3] = policies;
+    let (dom1, dom1_h) = make_child_with_policy(&platform, &dom0, child_policy(policy1));
     let dom1_id = dom1.read().data.id;
     platform.register_domain(dom1_id, Some(dom0_id));
     Capability::switch(&platform, &dom0, dom1_h, 0).unwrap().0;
 
-    let (dom2, _dom2_h_in_dom0) = make_sealed_child(&dom0);
+    let (dom2, dom2_h_in_dom1) = make_child_with_policy(&platform, &dom1, child_policy(policy2));
     let dom2_id = dom2.read().data.id;
-    platform.register_domain(dom2_id, Some(dom0_id));
-    let dom2_h_in_dom1 = {
-        let dom2_weak = Arc::downgrade(&dom2);
-        let mut d1 = dom1.write();
-        let h = d1.data.allocate_domain_handle();
-        d1.data.add_domain_capability(h, dom2_weak);
-        h
-    };
+    platform.register_domain(dom2_id, Some(dom1_id));
     Capability::switch(&platform, &dom1, dom2_h_in_dom1, 0)
         .unwrap()
         .0;
 
-    let (dom3, _dom3_h_in_dom0) = make_sealed_child(&dom0);
+    let (dom3, dom3_h_in_dom2) = make_child_with_policy(&platform, &dom2, child_policy(policy3));
     let dom3_id = dom3.read().data.id;
-    platform.register_domain(dom3_id, Some(dom0_id));
-    let dom3_h_in_dom2 = {
-        let dom3_weak = Arc::downgrade(&dom3);
-        let mut d2 = dom2.write();
-        let h = d2.data.allocate_domain_handle();
-        d2.data.add_domain_capability(h, dom3_weak);
-        h
-    };
+    platform.register_domain(dom3_id, Some(dom2_id));
     Capability::switch(&platform, &dom2, dom3_h_in_dom2, 0)
         .unwrap()
         .0;
@@ -1158,15 +1825,6 @@ fn not_report_policy() -> VectorPolicy {
         write_set: RegBitmap::NONE,
         injectable: false,
     }
-}
-
-fn set_vector_policy(domain: &CapabilityRef<Domain>, vector: u8, policy: VectorPolicy) {
-    domain
-        .write()
-        .data
-        .policy
-        .interrupts
-        .set_policy(vector, policy);
 }
 
 /// After interrupt delivery to a 4-domain chain, verify the intermediate
@@ -1228,9 +1886,8 @@ fn test_4domain_interrupt_delivery_states() {
 /// dom2 (also `Report`) likewise stops immediately, dom3 still untouched.
 #[test]
 fn test_4domain_default_report_chain_stops_one_level_at_a_time() {
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
-    set_vector_policy(&dom1, 0, VectorPolicy::default_report());
-    set_vector_policy(&dom2, 0, VectorPolicy::default_report());
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain_with_policy(
+        0, [VectorPolicy::default_report(), VectorPolicy::default_report(), VectorPolicy::default_not_report()]);
     let dom1_id = dom1.read().data.id;
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, 0)
@@ -1303,19 +1960,24 @@ fn test_4domain_default_report_chain_stops_one_level_at_a_time() {
 /// `interrupt_return`/`interrupt_inject` signal at all.
 #[test]
 fn test_interrupt_resume_all_not_report_descends_to_leaf() {
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
     let vector = 0x40;
-    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
-    for domain in [&dom1, &dom2, &dom3] {
-        set_vector_policy(domain, vector, not_report_policy());
-    }
+    let (dom0, dom1, dom2, dom3, platform) =
+        setup_4domain_chain_with_policy(vector, std::array::from_fn(|_| not_report_policy()));
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
 
     let dom1_id = dom1.read().data.id;
     let dom3_id = dom3.read().data.id;
     let dom1_handle = find_domain_handle(&dom0, dom1_id);
+    let handed_off = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = handed_off.clone();
+    platform.set_handoff_hook(move |context, handoff| {
+        assert!(matches!(handoff, VpHandoff::Call));
+        assert_eq!(context.to_domain.read().data.id, dom3_id);
+        observed.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
     let (ctx, _) = Capability::switch(&platform, &dom0, dom1_handle, 0).unwrap();
+    assert!(handed_off.load(std::sync::atomic::Ordering::SeqCst));
 
     assert_eq!(ctx.to_domain.read().data.id, dom3_id);
     assert_eq!(ctx.to_vp_id, Some(0));
@@ -1347,12 +2009,9 @@ fn test_interrupt_resume_all_not_report_descends_to_leaf() {
 /// `interrupt_inject = None`. dom3 stays untouched (Waiting).
 #[test]
 fn test_interrupt_resume_stops_at_first_report_frame() {
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
     let vector = 0x41;
-    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
-    set_vector_policy(&dom1, vector, not_report_policy());
-    set_vector_policy(&dom2, vector, VectorPolicy::default_report());
-    set_vector_policy(&dom3, vector, not_report_policy());
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain_with_policy(
+        vector, [not_report_policy(), VectorPolicy::default_report(), not_report_policy()]);
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
 
@@ -1391,12 +2050,9 @@ fn test_interrupt_resume_stops_at_first_report_frame() {
 /// `interrupt_inject = Some(vector)`, `interrupt_return = None`.
 #[test]
 fn test_interrupt_resume_stops_at_leaf_with_report_injects() {
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
     let vector = 0x42;
-    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
-    set_vector_policy(&dom1, vector, not_report_policy());
-    set_vector_policy(&dom2, vector, not_report_policy());
-    set_vector_policy(&dom3, vector, VectorPolicy::default_report());
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain_with_policy(
+        vector, [not_report_policy(), not_report_policy(), VectorPolicy::default_report()]);
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
 
@@ -1434,12 +2090,9 @@ fn test_interrupt_resume_stops_at_leaf_with_report_injects() {
 /// signal whatsoever, exactly as if the interrupt never happened.
 #[test]
 fn test_interrupt_resume_all_not_report_including_leaf_is_fully_silent() {
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
     let vector = 0x43;
-    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
-    for domain in [&dom1, &dom2, &dom3] {
-        set_vector_policy(domain, vector, not_report_policy());
-    }
+    let (dom0, dom1, dom2, dom3, platform) =
+        setup_4domain_chain_with_policy(vector, std::array::from_fn(|_| not_report_policy()));
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
 
@@ -1459,12 +2112,9 @@ fn test_interrupt_resume_all_not_report_including_leaf_is_fully_silent() {
 /// carries `interrupt_inject` instead.
 #[test]
 fn test_interrupt_resume_all_report_stops_at_every_level() {
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
     let vector = 0x44;
-    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
-    for domain in [&dom1, &dom2, &dom3] {
-        set_vector_policy(domain, vector, VectorPolicy::default_report());
-    }
+    let (dom0, dom1, dom2, dom3, platform) =
+        setup_4domain_chain_with_policy(vector, std::array::from_fn(|_| VectorPolicy::default_report()));
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
 
@@ -1501,12 +2151,9 @@ fn test_interrupt_resume_all_report_stops_at_every_level() {
 /// migration). This must succeed — no ownership/identity check.
 #[test]
 fn test_4domain_resume_from_different_vp_and_core_succeeds() {
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
     let vector = 0x45;
-    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
-    set_vector_policy(&dom1, vector, not_report_policy());
-    set_vector_policy(&dom2, vector, VectorPolicy::default_report());
-    set_vector_policy(&dom3, vector, not_report_policy());
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain_with_policy(
+        vector, [not_report_policy(), VectorPolicy::default_report(), not_report_policy()]);
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
 
@@ -1562,20 +2209,12 @@ fn test_independent_chain_cannot_steal_deeper_waiting_frame() {
     init_vp_running(&a, 1, 1);
 
     // Domain B, child of A, 4 VPs (vp0 = B1, vp1 = B2).
-    let (b, b_h) = make_sealed_child(&a);
-    set_vector_policy(&b, 0, VectorPolicy::default_report());
+    let mut policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    policy.interrupts.set_policy(0, VectorPolicy::default_report());
+    let (b, b_h) = make_child_with_policy(&platform, &a, policy);
 
-    // Domain C, child of A (visible to B via a manually added handle, as in
-    // `setup_3domain_chain` above).
-    let (c, _c_h_in_a) = make_sealed_child(&a);
+    let (c, c_h_in_b) = make_sealed_child(&platform, &b);
     let c_id = c.read().data.id;
-    let c_h_in_b = {
-        let c_weak = Arc::downgrade(&c);
-        let mut bw = b.write();
-        let h = bw.data.allocate_domain_handle();
-        bw.data.add_domain_capability(h, c_weak);
-        h
-    };
 
     // Chain 1: A1 (core 0) -> B1 (core 0) -> C1 (core 0).
     Capability::switch(&platform, &a, b_h, 0).unwrap(); // A1 Locked, B1 Running(core0)
@@ -1586,6 +2225,7 @@ fn test_independent_chain_cannot_steal_deeper_waiting_frame() {
     Capability::switch(&platform, &a, b_h, 1).unwrap(); // A2 Locked, B2 Running(core1)
 
     // Interrupt hits C1 on core 0; A is the handler.
+    platform.set_current_core(Some(0));
     Capability::<Domain>::deliver_interrupt_vp(&platform, &c, 0, 0).unwrap();
 
     // B1 is now Waiting{unlocks:Some(C1), blocked:false} (directly called by

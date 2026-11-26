@@ -57,8 +57,6 @@ fn test_hypercall_constants() -> Result<(), &'static str> {
     if THEMIS_ENUMERATE != 0x13 { return Err("THEMIS_ENUMERATE"); }
     if THEMIS_MAP_SELF != 0x1F { return Err("THEMIS_MAP_SELF"); }
     if THEMIS_SET_POLICY != 0x22 { return Err("THEMIS_SET_POLICY"); }
-    if THEMIS_SEND_CHAN != 0x20 { return Err("THEMIS_SEND_CHAN"); }
-    if THEMIS_ACCEPT_CHAN != 0x21 { return Err("THEMIS_ACCEPT_CHAN"); }
     Ok(())
 }
 

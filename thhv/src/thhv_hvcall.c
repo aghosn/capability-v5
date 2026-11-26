@@ -10,6 +10,29 @@
 #include <linux/module.h>
 #include "thhv_internal.h"
 
+int themis_create_doorbell(u64 child, u8 vector, u64 kind, u64 vp,
+			  u64 *handle, u64 *port)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_CREATE_DOORBELL,
+				    child, vector, kind, vp, 0,
+				    handle, port, NULL);
+	return __themis_to_errno(status);
+}
+
+int themis_notify(u64 handle, u64 value)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_NOTIFY, handle, value, 0, 0, 0,
+				    NULL, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
+int themis_revoke(u64 parent, u64 sub)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_REVOKE, parent, sub, 0, 0, 0,
+				    NULL, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
 /* ── Generic fallback (for opcodes without dedicated wrappers) ─────────── */
 
 int thhv_hcall(u64 opcode, u64 arg0, u64 arg1, u64 arg2,
@@ -41,7 +64,7 @@ int themis_alias(u64 parent, u64 start, u64 size, u64 rights,
 }
 
 /**
- * themis_send - Send a memory capability to a child domain.
+ * themis_send - Send a capability to a receiver domain or channel.
  * @cap:           Capability to send
  * @receiver:      Child domain handle
  * @attrs:         Send attributes / rights
@@ -81,14 +104,6 @@ int themis_reject(u64 pending_id)
 	return __themis_to_errno(status);
 }
 
-int themis_revoke_mem(u64 parent, u64 child_sub)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_REVOKE_MEM,
-				     parent, child_sub, 0, 0, 0,
-				     NULL, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
 /* ── Domain operations ─────────────────────────────────────────────────── */
 
 int themis_create_domain(u64 cores_mask, u64 api_flags, u64 num_vps,
@@ -108,14 +123,6 @@ int themis_seal(u64 domain)
 	return __themis_to_errno(status);
 }
 
-int themis_revoke_domain(u64 domain)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_REVOKE_DOMAIN,
-				     domain, 0, 0, 0, 0,
-				     NULL, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
 int themis_switch(u64 target_domain, u64 vp_id)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_SWITCH,
@@ -130,22 +137,6 @@ int themis_get_chan(u64 domain, u64 *out_handle)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_GET_CHAN,
 				     domain, 0, 0, 0, 0,
-				     out_handle, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
-int themis_send_chan(u64 chan, u64 receiver, u64 attrs)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_SEND_CHAN,
-				     chan, receiver, attrs, 0, 0,
-				     NULL, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
-int themis_accept_chan(u64 pending_id, u64 *out_handle)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_ACCEPT_CHAN,
-				     pending_id, 0, 0, 0, 0,
 				     out_handle, NULL, NULL);
 	return __themis_to_errno(status);
 }
@@ -263,31 +254,11 @@ int themis_domcomm_notify(void)
 	return __themis_to_errno(status);
 }
 
-/* ── ThemIC doorbell registration ────────────────────────────────────── */
-
-int themis_register_doorbell(u64 child_domain, u64 gpa, u64 size,
-     u64 datamatch, u64 flags, u64 *out_doorbell_id)
+int themis_domcomm_notify_grow(u64 *pages, u64 *capacity)
 {
-u64 status = __themis_vmcall(THEMIS_OP_REGISTER_DOORBELL,
-     child_domain, gpa, size, datamatch, flags,
-     out_doorbell_id, NULL, NULL);
-return __themis_to_errno(status);
-}
-
-int themis_unregister_doorbell(u64 child_domain, u64 doorbell_id)
-{
-u64 status = __themis_vmcall(THEMIS_OP_UNREGISTER_DOORBELL,
-     child_domain, doorbell_id, 0, 0, 0,
-     NULL, NULL, NULL);
-return __themis_to_errno(status);
-}
-
-int themis_set_themic_vector(u64 vector)
-{
-u64 status = __themis_vmcall(THEMIS_OP_SET_THEMIC_VECTOR,
-     vector, 0, 0, 0, 0,
-     NULL, NULL, NULL);
-return __themis_to_errno(status);
+	u64 status = __themis_vmcall(THEMIS_OP_DOMCOMM_NOTIFY,
+				    0, 0, 0, 0, 0, pages, capacity, NULL);
+	return __themis_to_errno(status);
 }
 
 int themis_inject_interrupt(u64 child_domain, u32 vp_id, u8 vector)

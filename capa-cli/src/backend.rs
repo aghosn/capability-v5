@@ -191,6 +191,35 @@ impl fmt::Display for HwUpdateKind {
 // ─── Backend trait ───
 
 pub trait Backend {
+    fn create_doorbell(
+        &mut self, _caller: DomainId, _child: Option<DomainId>, _vector: u8,
+        _kind: capability_engine::DoorbellKind,
+    ) -> Result<(u64, u64)> {
+        Err(BackendError::NotSupported)
+    }
+
+    fn send_capability(&mut self, _caller: DomainId, _handle: u64, _receiver: DomainId) -> Result<()> {
+        Err(BackendError::NotSupported)
+    }
+
+    fn accept_handle(&mut self, _receiver: DomainId, _pending: u64) -> Result<u64> {
+        Err(BackendError::NotSupported)
+    }
+
+    fn revoke_child(&mut self, _caller: DomainId, _parent: Option<u64>, _sub: u64) -> Result<()> {
+        Err(BackendError::NotSupported)
+    }
+
+    fn notify(&mut self, _caller: DomainId, _core: u64, _handle: u64, _value: u64)
+        -> Result<Option<SwitchContextDto>>
+    {
+        Err(BackendError::NotSupported)
+    }
+
+    fn doorbells(&self, _domain: DomainId) -> Result<String> {
+        Err(BackendError::NotSupported)
+    }
+
     // === Lifecycle ===
 
     /// Initialize root domain + root memory region of given size.

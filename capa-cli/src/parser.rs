@@ -48,7 +48,10 @@ pub fn parse_api(s: &str) -> Result<MonitorAPI, String> {
             "REVOKE" => MonitorAPI::REVOKE as u16,
             "GETCHAN" => MonitorAPI::GETCHAN as u16,
             "RECEIVE_AFTER_SEAL" => MonitorAPI::RECEIVE_AFTER_SEAL as u16,
-            "ALL" => return Ok(MonitorAPI::from_bits(0x1FFF)),
+            "CREATE_DOORBELL" => MonitorAPI::CREATE_DOORBELL,
+            "NOTIFY" => MonitorAPI::NOTIFY,
+            "MAP_SELF" => MonitorAPI::MAP_SELF,
+            "ALL" => return Ok(MonitorAPI::ALL),
             "NONE" => return Ok(MonitorAPI::from_bits(0)),
             _ => return Err(format!("Invalid API permission: {}", part)),
         };
@@ -90,7 +93,7 @@ pub fn format_api(api: &MonitorAPI) -> String {
     if bits == 0 {
         return "NONE".to_string();
     }
-    if bits == MonitorAPI::from_bits(0x1FFF).bits() {
+    if bits == MonitorAPI::ALL.bits() {
         return "ALL".to_string();
     }
     let flags = [
@@ -107,6 +110,9 @@ pub fn format_api(api: &MonitorAPI) -> String {
         (MonitorAPI::REVOKE, "REVOKE"),
         (MonitorAPI::GETCHAN, "GETCHAN"),
         (MonitorAPI::RECEIVE_AFTER_SEAL, "RECEIVE_AFTER_SEAL"),
+        (MonitorAPI::MAP_SELF, "MAP_SELF"),
+        (MonitorAPI::CREATE_DOORBELL, "CREATE_DOORBELL"),
+        (MonitorAPI::NOTIFY, "NOTIFY"),
     ];
     flags.iter()
         .filter(|(flag, _)| bits & flag != 0)

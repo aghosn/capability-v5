@@ -19,7 +19,7 @@ mod vp;
 
 use core::sync::atomic::Ordering;
 
-use capability_engine::{CapaError, CapabilityRef, Domain, Platform};
+use capability_engine::{Capability, CapaError, CapabilityRef, Domain, Platform};
 use themis_abi::{errors, opcodes};
 
 use crate::arch_traits::traits::ArchVpOps;
@@ -88,17 +88,6 @@ pub(crate) trait ArchHypercall: ArchVpOps {
         vp_id: u64,
     );
 
-    /// `THEMIS_RING_DOORBELL` opcode — signals a parent / sibling domain.
-    /// Like `h_switch`, may swap the active VP, so the handler owns reply.
-    fn h_ring_doorbell(
-        &mut self,
-        vp: &mut Self::VpHandle,
-        platform: &ThemisPlatform,
-        caller: &CapabilityRef<Domain>,
-        gpa: u64,
-        value: u64,
-    );
-
     /// `THEMIS_INJECT_INTERRUPT` opcode — post a vector into a (typically
     /// stopped) target VP. On x86 this writes the VP's Posted-Interrupt
     /// Descriptor; on ARM it would push into the LR/ICH state. Does NOT
@@ -122,9 +111,9 @@ pub(crate) trait ArchHypercall: ArchVpOps {
 /// Reads opcode + args via the `ArchVpOps` accessors, dispatches each opcode
 /// to either a generic handler (capa/vp/attest/domcomm/simple doorbell) or
 /// an architecture-locked handler (`ArchHypercall::h_add_vp` / `h_switch` /
-/// `h_ring_doorbell`), then writes the reply and advances the IP.
+/// `h_inject_interrupt`), then writes the reply and advances the IP.
 ///
-/// The two swap opcodes (`THEMIS_SWITCH` and `THEMIS_RING_DOORBELL`) may
+/// The swap opcodes (`THEMIS_SWITCH` and Sync `THEMIS_NOTIFY`) may
 /// swap the active VP underneath us. They own their own reply protocol:
 /// on success they've swapped, on early error they've written the reply
 /// themselves.  This function returns early without touching the (possibly
@@ -164,8 +153,7 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
         opcodes::THEMIS_REJECT => capa::do_reject(platform, &caller, arg0),
         opcodes::THEMIS_CREATE_DOMAIN => capa::do_create_domain(platform, &caller, arg0, arg1),
         opcodes::THEMIS_SEAL => capa::do_seal(platform, &caller, arg0),
-        opcodes::THEMIS_REVOKE_MEM => capa::do_revoke_mem(platform, &caller, arg0, arg1),
-        opcodes::THEMIS_REVOKE_DOMAIN => capa::do_revoke_domain(platform, &caller, arg0),
+        opcodes::THEMIS_REVOKE => capa::do_revoke(platform, &caller, arg0, arg1),
         opcodes::THEMIS_ATTEST_SELF => {
             Ok(attest::do_attest_self(platform, &caller, arg0, arg1, arg2, arg3))
         }
@@ -180,9 +168,15 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
             arch.h_switch(vp, platform, &caller, arg0, arg1);
             return;
         }
-        opcodes::THEMIS_RING_DOORBELL => {
-            arch.h_ring_doorbell(vp, platform, &caller, arg0, arg1);
-            return;
+        opcodes::THEMIS_NOTIFY => {
+            match Capability::notify(platform, &caller, arg0, arg1) {
+                Ok(Some(_)) => return,
+                Ok(None) => Ok(HypercallResult::success()),
+                Err(error) => Err(error),
+            }
+        }
+        opcodes::THEMIS_CREATE_DOORBELL => {
+            doorbell::do_create_doorbell(platform, &caller, arg0, arg1, arg2, arg3)
         }
 
         opcodes::THEMIS_SET_POLICY => {
@@ -195,21 +189,6 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
         opcodes::THEMIS_GET_REG => vp::do_get_reg(platform, &caller, arg0, arg1, arg2),
         opcodes::THEMIS_SET_REG => vp::do_set_reg(platform, &caller, arg0, arg1, arg2, arg3),
 
-        opcodes::THEMIS_REGISTER_DOORBELL => Ok(doorbell::do_register_doorbell(
-            platform,
-            &caller,
-            arg0,
-            arg1,
-            arg2 as u32,
-            arg3,
-            arg4 as u32,
-        )),
-        opcodes::THEMIS_UNREGISTER_DOORBELL => {
-            Ok(doorbell::do_unregister_doorbell(platform, &caller, arg0, arg1 as u32))
-        }
-        opcodes::THEMIS_SET_THEMIC_VECTOR => {
-            Ok(doorbell::do_set_themic_vector(platform, &caller, arg0))
-        }
         opcodes::THEMIS_INJECT_INTERRUPT => {
             Ok(arch.h_inject_interrupt(vp, platform, &caller, arg0, arg1 as u32, arg2 as u8))
         }
@@ -237,11 +216,13 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
         opcodes::THEMIS_MAP_SELF => capa::do_map_self(platform, &caller, arg0, arg1),
 
         opcodes::THEMIS_GET_CHAN => capa::do_get_chan(platform, &caller, arg0),
-        opcodes::THEMIS_SEND_CHAN => capa::do_send_chan(platform, &caller, arg0, arg1, arg2),
-        opcodes::THEMIS_ACCEPT_CHAN => capa::do_accept_chan(platform, &caller, arg0),
 
-        // Stubbed — return ERR_UNIMPL
-        opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => Ok(HypercallResult::unimpl()),
+        opcodes::THEMIS_ENUMERATE => Capability::enumerate_pending(platform, &caller, arg0)
+            .map(|pending| match pending {
+                Some(id) => HypercallResult::success_2(id, 1),
+                None => HypercallResult::success_2(0, 0),
+            }),
+        opcodes::THEMIS_ATTEST => Ok(HypercallResult::unimpl()),
 
         _unknown_opcode => {
             serial_debug!("[VMCALL] unknown opcode {:#x}", _unknown_opcode);

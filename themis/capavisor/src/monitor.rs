@@ -21,8 +21,7 @@ use crate::arch_traits::traits::ArchVpOps;
 use crate::arch_traits::types::{ExitInfo, SemanticExit, Vp};
 use crate::platform::ThemisPlatform;
 use crate::serial_println;
-use capability_engine::interposition::{DefaultAction, ProcFeaturePolicy};
-use capability_engine::{Capability, Platform as _};
+use capability_engine::{Capability, FeatureAction as InterpositionAction, Platform as _};
 
 // ── Generic monitor loop ──────────────────────────────────────────────────── //
 
@@ -71,98 +70,7 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
             }
 
             SemanticExit::PolicyDriven { reason, ref info } => {
-                // CPUID interposition: per-(leaf, subleaf) policy overrides ExitPolicy.
-                if let ExitInfo::Cpuid { leaf, subleaf } = info {
-                    match lookup_cpuid_action(platform, *leaf, *subleaf) {
-                        InterpositionAction::Trap => {
-                            vp.forward_exit(reason);
-                            continue;
-                        }
-                        InterpositionAction::Native => {
-                            vp.handle_local(reason, info);
-                            continue;
-                        }
-                        InterpositionAction::Emulate(result)
-                        | InterpositionAction::EmulateConst(result) => {
-                            vp.emulate_cpuid(&result);
-                            continue;
-                        }
-                    }
-                }
-
-                // MSR interposition: per-MSR policy overrides ExitPolicy.
-                if let ExitInfo::Msr {
-                    number, is_write, value,
-                } = info
-                {
-                    let action = lookup_msr_action(platform, *number);
-                    if !is_write {
-                        match action {
-                            InterpositionAction::Trap => {
-                                vp.forward_exit(reason);
-                                continue;
-                            }
-                            InterpositionAction::Native => {
-                                vp.handle_local(reason, info);
-                                continue;
-                            }
-                            InterpositionAction::Emulate(stored) => {
-                                if vp.try_emulate_rdmsr(*number, stored).is_err() {
-                                    vp.emulate_rdmsr(stored);
-                                }
-                                continue;
-                            }
-                            InterpositionAction::EmulateConst(stored) => {
-                                vp.emulate_rdmsr(stored);
-                                continue;
-                            }
-                        }
-                    } else {
-                        // WRMSR: symmetric three-state (Emulate) plus a
-                        // read-only variant (EmulateConst).
-                        match action {
-                            InterpositionAction::Trap => {
-                                vp.forward_exit(reason);
-                                continue;
-                            }
-                            InterpositionAction::Native => {
-                                vp.handle_local(reason, info);
-                                continue;
-                            }
-                            InterpositionAction::Emulate(_) => {
-                                // Try capavisor's internal WRMSR registry first
-                                // (TSC_DEADLINE, APIC_BASE, …).  If no handler
-                                // is registered, treat the MSR as a per-domain
-                                // scratch register: store `value` in the policy
-                                // (so the next RDMSR returns it) and advance
-                                // RIP without a parent round-trip.
-                                match vp.try_emulate_wrmsr(*number, *value) {
-                                    Ok(()) => continue,
-                                    Err(()) => {
-                                        let _ = update_msr_emulate_value(
-                                            platform, *number, *value,
-                                        );
-                                        vp.next_rip();
-                                        continue;
-                                    }
-                                }
-                            }
-                            InterpositionAction::EmulateConst(_) => {
-                                // Read-only: write is always discarded,
-                                // just advance RIP so the guest doesn't fault.
-                                vp.next_rip();
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                // Default: consult ExitPolicy for all other exit reasons.
-                if lookup_exit_trap(platform, reason) {
-                    vp.forward_exit(reason);
-                } else {
-                    vp.handle_local(reason, info);
-                }
+                handle_policy_exit(vp, platform, reason, info);
             }
         }
     }
@@ -181,92 +89,81 @@ fn get_platform() -> &'static ThemisPlatform {
     unsafe { &*ptr }
 }
 
-// ── Policy lookup (generic) ───────────────────────────────────────────────── //
+// ── Policy-driven exit handling ───────────────────────────────────────────── //
 
-/// Look up whether the current domain's ExitPolicy traps this exit reason.
-/// Returns `true` (forward to parent) or `false` (handle locally).
-/// Defaults to `true` (fail-closed) if no capability is found.
-fn lookup_exit_trap(platform: &ThemisPlatform, reason: u32) -> bool {
-    let core_id = platform.get_current_core().unwrap_or(0) as usize;
-    platform
-        .get_core_cap(core_id)
-        .map(|c| c.read().data.policy.exits.get_action(reason).trap)
-        .unwrap_or(true)
+fn policy_or_halt<T>(result: capability_engine::Result<T>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            serial_println!("[MONITOR] engine policy/state failure: {:?}", error);
+            halt_forever();
+        }
+    }
 }
 
-// ── CPUID / MSR interposition ─────────────────────────────────────────────── //
-
-/// Result of looking up a CPUID or MSR interposition policy.
-enum InterpositionAction<V> {
-    Trap,
-    Native,
-    Emulate(V),
-    /// Read-only emulate: writes are always discarded, reads always return
-    /// the stored value (see `ProcFeaturePolicy::EmulateConst`).
-    EmulateConst(V),
-}
-
-/// Look up CPUID interposition policy for a specific (leaf, subleaf).
-fn lookup_cpuid_action(
+fn handle_policy_exit<A: ArchVpOps>(
+    vp: &mut Vp<A>,
     platform: &ThemisPlatform,
-    leaf: u32,
-    subleaf: u32,
-) -> InterpositionAction<capability_engine::interposition::CpuidResult> {
-    let core_id = platform.get_current_core().unwrap_or(0) as usize;
-    let Some(cap) = platform.get_core_cap(core_id) else {
-        return InterpositionAction::Trap; // fail-closed
-    };
-    let guard = cap.read();
-    let cpuid_cfg = &guard.data.policy.cpuid;
-    let key = (leaf, subleaf);
-    match cpuid_cfg.lookup(&key) {
-        Some(ProcFeaturePolicy::Emulate(_, value)) => InterpositionAction::Emulate(*value),
-        Some(ProcFeaturePolicy::EmulateConst(_, value)) => InterpositionAction::EmulateConst(*value),
-        Some(ProcFeaturePolicy::Native(_)) => InterpositionAction::Native,
-        Some(ProcFeaturePolicy::Trap(_)) => InterpositionAction::Trap,
-        None => match cpuid_cfg.default {
-            DefaultAction::Trap => InterpositionAction::Trap,
-            DefaultAction::Native => InterpositionAction::Native,
-        },
-    }
-}
-
-/// Look up MSR interposition policy for a specific MSR number.
-fn lookup_msr_action(platform: &ThemisPlatform, msr: u32) -> InterpositionAction<u64> {
-    let core_id = platform.get_current_core().unwrap_or(0) as usize;
-    let Some(cap) = platform.get_core_cap(core_id) else {
-        return InterpositionAction::Trap; // fail-closed
-    };
-    let guard = cap.read();
-    let msr_cfg = &guard.data.policy.msrs;
-    match msr_cfg.lookup(&msr) {
-        Some(ProcFeaturePolicy::Emulate(_, value)) => InterpositionAction::Emulate(*value),
-        Some(ProcFeaturePolicy::EmulateConst(_, value)) => InterpositionAction::EmulateConst(*value),
-        Some(ProcFeaturePolicy::Native(_)) => InterpositionAction::Native,
-        Some(ProcFeaturePolicy::Trap(_)) => InterpositionAction::Trap,
-        None => match msr_cfg.default {
-            DefaultAction::Trap => InterpositionAction::Trap,
-            DefaultAction::Native => InterpositionAction::Native,
-        },
-    }
-}
-
-/// Update the stored Emulate value for an MSR in the current core's
-/// domain policy.  Returns `true` if an Emulate entry existed and was
-/// updated, `false` otherwise (caller falls back to Trap semantics).
-///
-/// Goes through `Capability::update_msr_emulate_value` (capa-engine,
-/// `platform::execute`-mediated) rather than taking a direct write lock on
-/// the domain capability — per axiom A9, all domain-state mutation must go
-/// through the capability engine's interface, the same as every other
-/// policy write in this codebase (`set_policy`, `deliver_interrupt_vp`,
-/// etc.).
-fn update_msr_emulate_value(platform: &ThemisPlatform, msr: u32, value: u64) -> bool {
-    let core_id = platform.get_current_core().unwrap_or(0) as usize;
-    let Some(cap) = platform.get_core_cap(core_id) else {
-        return false;
-    };
-    Capability::update_msr_emulate_value(platform, &cap, msr, value).is_ok()
+    reason: u32,
+    info: &ExitInfo,
+) {
+    let core = policy_or_halt(
+        platform
+            .get_current_core()
+            .ok_or(capability_engine::CapaError::NotFound),
+    );
+    let binding = policy_or_halt(platform.switch_manager().get_core(core).and_then(|core| {
+        core.current_binding()
+            .ok_or(capability_engine::CapaError::NotFound)
+    }));
+    policy_or_halt(Capability::with_vp_exit(platform, &binding, |exit| {
+        if let ExitInfo::Cpuid { leaf, subleaf } = info {
+            match exit.cpuid_action(*leaf, *subleaf) {
+                InterpositionAction::Trap => {
+                    exit.forward(reason)?;
+                }
+                InterpositionAction::Native => vp.handle_local(reason, info),
+                InterpositionAction::Emulate(result)
+                | InterpositionAction::EmulateConst(result) => {
+                    vp.emulate_cpuid(&result);
+                }
+            }
+            return Ok(());
+        }
+        if let ExitInfo::Msr {
+            number,
+            is_write,
+            value,
+        } = info
+        {
+            match exit.msr_action(*number) {
+                InterpositionAction::Trap => {
+                    exit.forward(reason)?;
+                }
+                InterpositionAction::Native => vp.handle_local(reason, info),
+                InterpositionAction::Emulate(stored) if !is_write => {
+                    if vp.try_emulate_rdmsr(*number, stored).is_err() {
+                        vp.emulate_rdmsr(stored);
+                    }
+                }
+                InterpositionAction::Emulate(_) => {
+                    if vp.try_emulate_wrmsr(*number, *value).is_err() {
+                        exit.update_msr_emulate_value(*number, *value)?;
+                        vp.next_rip();
+                    }
+                }
+                InterpositionAction::EmulateConst(stored) if !is_write => vp.emulate_rdmsr(stored),
+                InterpositionAction::EmulateConst(_) => vp.next_rip(),
+            }
+            return Ok(());
+        }
+        if exit.exit_action(reason).trap {
+            exit.forward(reason)?;
+        } else {
+            vp.handle_local(reason, info);
+        }
+        Ok(())
+    }));
 }
 
 // ── Interrupt handling (generic policy, arch primitives) ───────────────────── //

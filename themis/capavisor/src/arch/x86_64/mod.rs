@@ -29,7 +29,8 @@ pub mod hypercall;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.
 pub use arch_state::{flush_tlb_handle, ArchDomainState, ArchPlatformState};
+pub(crate) use hypercall::switch::complete_vp_handoff;
+pub use hypercall::vp::allocate_vp;
 pub use iommu_dev::{assign_device, release_device};
 pub use iommu_ir::{invalidate_domain_irtes, program_domain_irtes};
-pub use hypercall::vp::allocate_vp;
 pub(crate) use vcpu_switch::complete_revoke_switch;

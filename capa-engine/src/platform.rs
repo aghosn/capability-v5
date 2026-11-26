@@ -114,12 +114,36 @@ pub struct CoreSyncPoints {
     pub applied: Arc<dyn Semaphore>,
 }
 
+/// Engine-selected hardware work for a validated VP handoff.
+#[derive(Clone, Copy, Debug)]
+pub enum VpHandoff {
+    Call,
+    Return {
+        exit_reason: Option<u32>,
+        read_set: crate::domain::RegBitmap,
+    },
+    Interrupt {
+        vector: u8,
+        read_set: crate::domain::RegBitmap,
+    },
+}
 
 /// Platform-specific primitives required by the capability engine.
 ///
 /// Implementations must be `Send + Sync` so the engine can share a platform
 /// reference across cores.
 pub trait Platform: Send + Sync {
+    /// Validate queue space and interrupt backing before publishing. On success,
+    /// publish the record, post the interrupt, then call `commit` exactly once,
+    /// with the producer lock released. No fallible work follows publication.
+    fn commit_doorbell(
+        &self,
+        _notification: &crate::DoorbellNotification,
+        _commit: &mut dyn FnMut(),
+    ) -> Result<()> {
+        Err(CapaError::NotSupported)
+    }
+
     // -----------------------------------------------------------------------
     // Serialisation — global read-write lock
     // -----------------------------------------------------------------------
@@ -336,17 +360,21 @@ pub trait Platform: Send + Sync {
         Ok(())
     }
 
-    /// Called by `Capability::switch`, still under `execute()`'s op-lock,
-    /// right after `(domain_id, vp_id)` transitions `Available → Running`.
+    /// Called under `execute()`'s op-lock by `Capability::seal` to freeze
+    /// each VP's initial registers with `RegBitmap::ALL` before publishing
+    /// Sealed, and by `Capability::switch` after `Available → Running`
+    /// with the effective runtime write mask.
     ///
     /// The platform must read whatever parent-writable shared state it
     /// keeps for this VP (e.g. the COMM page's dirty registers on x86),
     /// filter it against `write_set` (the domain's own register-write
     /// policy, already resolved by the engine from the VP's pre-transition
-    /// run_state), and stash the result keyed however the platform likes.
-    /// The engine never touches or interprets this data; a later,
-    /// platform-only accessor (not part of this trait) retrieves it after
-    /// the lock releases and the VP has actually resumed.
+    /// run_state), and merge the authorized values into private pending state.
+    /// An empty or denied runtime capture must preserve initialization frozen
+    /// at seal. Never reread shared values when applying that pending state.
+    /// The engine never touches or interprets this data. The platform's
+    /// [`handoff_vp`](Self::handoff_vp) retrieves and applies its private
+    /// pending state after loading the destination, still under the lock.
     ///
     /// This exists so the read of parent-writable shared memory happens
     /// under the same lock as the run_state transition, instead of before
@@ -354,9 +382,10 @@ pub trait Platform: Send + Sync {
     /// that memory in the unsynchronized gap between resolving the target
     /// and reading it.
     ///
-    /// Returning `Err` aborts the whole `switch` operation: the run_state
-    /// transition is rolled back to `Available`, so the transition and the
-    /// snapshot share fate.
+    /// Returning `Err` leaves sealing unpublished or rolls a switch back to
+    /// Available. Captures already completed during a failed seal remain
+    /// authorized initialization; subsequent captures must merge by register
+    /// ID so retrying can update them without replaying older values.
     ///
     /// **Default implementation** is a no-op success (platforms with no
     /// parent-writable shared VP state, e.g. capa-cli's simulation).
@@ -404,6 +433,23 @@ pub trait Platform: Send + Sync {
     ///
     /// **Default implementation** is a no-op.
     fn complete_revoke_switch(&self, _core_id: CoreId, _src: (DomainId, u64), _dst: (DomainId, u64)) {}
+
+    /// Save/release the source VP and load the destination, without entering
+    /// the guest. The engine has validated and reserved both VPs and holds
+    /// its shared operation lock throughout this callback.
+    ///
+    /// For returns and interrupt unwinds the source remains Running and the
+    /// destination Locked until this finishes. Never publish a source as
+    /// Available/Waiting while its hardware state is still owned by the core.
+    /// Calls have already claimed the destination Running and locked the source.
+    ///
+    /// Apply only the engine-supplied register disclosure mask. Do not call
+    /// back into mediated operations, decide authority, or resume a guest.
+    /// All recoverable checks must precede this callback; hardware failure
+    /// after a partial handoff is a fatal platform error, not a returned error.
+    ///
+    /// The default is a no-op for platforms without hardware VP state.
+    fn handoff_vp(&self, _context: &crate::switch::SwitchContext, _handoff: VpHandoff) {}
 
     // -----------------------------------------------------------------------
     // Virtual processor tracking

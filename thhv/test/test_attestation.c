@@ -56,11 +56,12 @@ struct attest_report {
 	uint32_t nr_pa_entries;
 	uint16_t chunk_index;
 	uint16_t total_chunks;
-	uint32_t reserved;
+	uint32_t nr_doorbells;
 };
 #define ATTEST_REPORT_SIZE  sizeof(struct attest_report)
 
 #define DOMCOMM_ATTEST_F_SEALED  (1U << 0)
+#define DOMCOMM_ATTEST_F_DOORBELLS (1U << 2)
 
 /* SignedEnvelope (168 bytes, matches domcomm.rs).
  *
@@ -69,6 +70,7 @@ struct attest_report {
  *   [ mem_cap_entry × nr_mem_caps (40B each) ]
  *   [ dom_cap_entry × nr_dom_caps (16B each) ]
  *   [ pa_map_entry  × nr_pa_entries (24B each) ]
+ *   [ doorbell_entry × nr_doorbells (40B each) ]
  *   ─────────────── common base ends here ───────────────
  *   [ signed_envelope (168B) ]
  *   [ tpm_quote (variable, tpm_quote_size bytes) ]   (optional, if TPM)
@@ -93,13 +95,15 @@ struct signed_envelope {
 #define MEM_CAP_ENTRY_SIZE  40
 #define DOM_CAP_ENTRY_SIZE  16
 #define PA_MAP_ENTRY_SIZE   24
+#define DOORBELL_ENTRY_SIZE 40
 
 static size_t common_base_size(const struct attest_report *hdr)
 {
 	return ATTEST_REPORT_SIZE
 		+ (size_t)hdr->nr_mem_caps  * MEM_CAP_ENTRY_SIZE
 		+ (size_t)hdr->nr_dom_caps  * DOM_CAP_ENTRY_SIZE
-		+ (size_t)hdr->nr_pa_entries * PA_MAP_ENTRY_SIZE;
+		+ (size_t)hdr->nr_pa_entries * PA_MAP_ENTRY_SIZE
+		+ (size_t)hdr->nr_doorbells * DOORBELL_ENTRY_SIZE;
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -126,7 +130,7 @@ static void hexdump(const char *label, const uint8_t *buf, size_t len)
 /*
  * Capavisor signs: ed25519_sign(SHA-256(common_base || nonce || user_pub_key))
  * where common_base = report_buf[0 .. envelope_offset]
- *   = [attest_report 40B][mem_caps][dom_caps][pa_map].
+ *   = [attest_report 40B][mem_caps][dom_caps][pa_map][doorbells].
  *
  * So the "message" for Ed25519 verify is the 32-byte SHA-256 digest.
  */
@@ -393,6 +397,13 @@ static int test_signed(int fd)
 	}
 
 	hdr = (struct attest_report *)buf;
+	if (!(hdr->flags & DOMCOMM_ATTEST_F_DOORBELLS) ||
+	    (hdr->flags & (1u << 1))) {
+		printf("  FAIL: unsupported attestation format flags %#x\n",
+		       hdr->flags);
+		free(buf);
+		return 1;
+	}
 	base_len = common_base_size(hdr);
 
 	printf("  domain_id=%lu flags=%#x num_vps=%u mem_caps=%u dom_caps=%u pa_entries=%u\n",

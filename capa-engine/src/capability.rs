@@ -376,6 +376,17 @@ impl Capability<MemoryRegion> {
 
         let mut updates = UpdateBatch::new();
 
+        // Descendants may overlap the COMM region; invalidate before reclaiming either.
+        if capa.owned.attributes.comm() {
+            let (target_id, vp) = match capa.data.comm_binding {
+                Some(b) => (b.target_domain_id, b.vp_id),
+                None => (capa.owned.owner, 0),
+            };
+            updates.add_uncomm_region(
+                capa.owned.owner, target_id, vp, capa.data.access.start, capa.data.access.size,
+            );
+        }
+
         // First, recursively revoke all children
         let children = mem::take(&mut capa.children);
         drop(capa); // Release lock before recursing
@@ -395,8 +406,6 @@ impl Capability<MemoryRegion> {
         let clean = capa.owned.attributes.clean();
         let vital = capa.owned.attributes.vital();
         let meta = capa.owned.attributes.meta();
-        let comm = capa.owned.attributes.comm();
-        let comm_binding = capa.data.comm_binding;
 
         // Check if child owner's domain is already revoked.
         // If so, skip ChangeRights and RevokeDomain — the domain's EPT
@@ -562,16 +571,6 @@ impl Capability<MemoryRegion> {
             }
         }
 
-        // Notify the platform that its access to the COMM region is gone.
-        // Emitted before RevokeDomain so the platform can unmap before tearing down.
-        if comm {
-            let (target_id, vp) = match comm_binding {
-                Some(b) => (b.target_domain_id, b.vp_id),
-                None => (child_owner, 0),
-            };
-            updates.add_uncomm_region(child_owner, target_id, vp, hpa_start, hpa_size);
-        }
-
         // Only emit RevokeDomain if the domain wasn't already marked revoked
         // (which means revoke_domain_subtree already emitted it).
         //
@@ -658,6 +657,14 @@ impl Capability<Domain> {
     /// Returns `true` if this is a channel capability (created by [`get_chan`]).
     #[inline]
     pub fn is_channel(&self) -> bool {
+        self.channel_target.is_some() && self.data.doorbell.is_none()
+    }
+
+    pub fn is_doorbell(&self) -> bool {
+        self.data.doorbell.is_some()
+    }
+
+    pub(crate) fn is_endpoint(&self) -> bool {
         self.channel_target.is_some()
     }
 
@@ -708,7 +715,7 @@ impl Capability<Domain> {
         Ok(child)
     }
 
-    fn validate_revoke_domain_subtree(
+    pub(crate) fn validate_revoke_domain_subtree(
         platform: &dyn Platform,
         domain_ref: &CapabilityRef<Domain>,
     ) -> Result<()> {
@@ -793,6 +800,9 @@ impl Capability<Domain> {
         domain_ref: &CapabilityRef<Domain>,
         fallback: Option<DomainId>,
     ) -> Result<UpdateBatch> {
+        if domain_ref.read().is_endpoint() {
+            return Self::revoke_endpoint(domain_ref);
+        }
         let mut updates = UpdateBatch::new();
 
         let (children, mem_weak_refs, domain_id, running_vps) = no_arcs_past_here!({

@@ -248,6 +248,74 @@ fn test_reject_channel_unfreezes_sender() {
     );
 }
 
+#[test]
+fn endpoint_send_rejects_memory_attributes_without_mutation() {
+    for doorbell in [false, true] {
+        for sealed in [false, true] {
+            let platform = common::TestPlatform::new();
+            let root = root_domain();
+            let handle = if doorbell {
+                Capability::create_doorbell(&platform, &root, None, 64, DoorbellKind::Sync)
+                    .unwrap()
+                    .0
+            } else {
+                Capability::get_chan_self(&platform, &root).unwrap().0
+            };
+            let endpoint = root.read().data.domain_capabilities[&handle]
+                .upgrade()
+                .unwrap();
+            let receiver_h = Capability::create(
+                &platform,
+                &root,
+                DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+            )
+            .unwrap()
+            .0;
+            if sealed {
+                Capability::seal(&platform, &root, receiver_h).unwrap();
+            }
+            let receiver = root.read().data.domain_capabilities[&receiver_h]
+                .upgrade()
+                .unwrap();
+            let root_id = root.read().data.id;
+            for bits in [
+                Attributes::HASH,
+                Attributes::CLEAN,
+                Attributes::VITAL,
+                Attributes::META,
+                Attributes::COMM,
+                Attributes::HASH | Attributes::CLEAN,
+            ] {
+                for typed in [false, true] {
+                    if doorbell && typed {
+                        continue;
+                    }
+                    let attrs = Attributes::from_bits(bits);
+                    let result = if typed {
+                        Capability::send_channel(&platform, &root, handle, receiver_h, attrs)
+                    } else {
+                        Capability::send(&platform, &root, handle, receiver_h, attrs)
+                    };
+                    assert_eq!(result.unwrap_err(), CapaError::InvalidValue);
+                    let held = root.read().data.domain_capabilities[&handle]
+                        .upgrade()
+                        .unwrap();
+                    assert!(Arc::ptr_eq(&held, &endpoint));
+                    assert!(!root.read().data.is_domain_handle_frozen(handle));
+                    assert!(receiver.read().data.domain_capabilities.is_empty());
+                    assert!(receiver.read().data.get_pending_domain_ids().is_empty());
+                    let e = endpoint.read();
+                    assert_eq!(e.owned.owner, root_id);
+                    assert_eq!(e.owned.attributes, Attributes::NONE);
+                    assert!(e.owned.pending_receiver.is_none());
+                    let owner = e.owned.owner_domain.as_ref().unwrap().upgrade().unwrap();
+                    assert!(Arc::ptr_eq(&owner, &root));
+                }
+            }
+        }
+    }
+}
+
 // ── Test 6: send_channel to unsealed receiver (immediate transfer) ───────────
 
 #[test]

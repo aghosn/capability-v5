@@ -133,14 +133,19 @@ pub enum Update {
 /// the *post-write* value so `apply_update` is pure (no engine re-read).
 ///
 /// **Platform expectations as of today:**
-/// - `Msr*` variants: must re-project the per-VP MSR bitmap.
+/// - `VpInterception`: project the supplied effective MSR and I/O policy
+///   into the selected VP's private hardware bitmaps.
 /// - All other variants: **no hardware projection required today**;
 ///   capavisor matches them to no-op arms. They exist so the engine's
-///   `set_policy` is uniform — every mutation emits an Update — which
-///   lets future platform projections (VMCS exit controls, interrupt
-///   visibility bitmaps, etc.) hook in without changing the engine.
+///   legacy domain-default deltas remain descriptive. VP-local software-only
+///   changes need no hardware update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyChange {
+    VpInterception {
+        vp_id: u64,
+        msrs: crate::interposition::MsrPolicy,
+        exits: crate::domain::ExitPolicy,
+    },
     /// `policy.cores` (allowed-core bitmap) updated. **No hardware
     /// projection today** — scheduling consults the value at dispatch.
     Cores(u64),
@@ -151,6 +156,15 @@ pub enum PolicyChange {
     // ── Interrupt routing (`policy.interrupts`) ──────────────────────
     /// Default per-vector interrupt visibility changed.
     InterruptDefaultVisibility(InterruptVisibility),
+    DefaultInterruptRegReadSet {
+        word: u8,
+        bits: u64,
+    },
+    DefaultInterruptRegWriteSet {
+        word: u8,
+        bits: u64,
+    },
+    DefaultVectorInjectable(bool),
     /// Per-vector visibility override changed (new effective policy
     /// snapshot for `vector`).
     VectorVisibility {
@@ -181,6 +195,14 @@ pub enum PolicyChange {
     // ── Exit routing (`policy.exits`) ────────────────────────────────
     /// Default exit-reason trap flag changed (true = forward to parent).
     DefaultExitTrap(bool),
+    DefaultExitRegReadSet {
+        word: u8,
+        bits: u64,
+    },
+    DefaultExitRegWriteSet {
+        word: u8,
+        bits: u64,
+    },
     /// Per-exit-reason action snapshot changed.
     ExitReason {
         reason: u32,
@@ -221,6 +243,13 @@ pub enum PolicyChange {
         subleaf: u32,
         word_index: u8,
         value: u32,
+    },
+    /// One packed 64-bit result word changed for an exact CPUID range.
+    CpuidEmulateRange {
+        start: (u32, u32),
+        end: (u32, u32),
+        word_index: u8,
+        value: u64,
     },
 
     // ── MSR interposition (`policy.msrs`) ────────────────────────────

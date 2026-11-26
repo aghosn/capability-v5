@@ -34,10 +34,14 @@ static void thhv_partition_destroy(struct kref *ref)
 	 * -ENOENT means the domain was already revoked (e.g. via
 	 * THHV_DEBUG_REVOKE_ALL) — silently ignore. */
 	if (part->domain_handle) {
-		ret = themis_revoke_domain(part->domain_handle);
-		if (ret && ret != -ENOENT)
-			pr_warn("thhv: REVOKE_DOMAIN 0x%llx failed (%d)\n",
+		ret = themis_revoke(part->domain_handle, 0);
+		if (ret && ret != -ENOENT) {
+			pr_warn("thhv: REVOKE domain=0x%llx failed (%d)\n",
 				part->domain_handle, ret);
+			/* The child may still use the pinned pages. */
+			__module_get(THIS_MODULE);
+			return;
+		}
 	}
 
 	if (part->vps) {
@@ -53,27 +57,16 @@ static void thhv_partition_destroy(struct kref *ref)
 		kfree(part->shared_meta_pages);
 	}
 
-	/* Unpin APIC-access sentinel page. */
-	if (part->apic_access_pages) {
-		unpin_user_pages(part->apic_access_pages,
-				 part->apic_access_nr_pages);
-		kfree(part->apic_access_pages);
-	}
+	/* Free whole EPT META allocations, including any rounding pages. */
+	{
+		struct thhv_ept_meta_allocation *allocation, *tmp;
 
-	/* Free kernel-allocated EPT META pages.
-	 * Pages may be compound (contiguous batches) — only free heads. */
-	if (part->ept_meta_pages) {
-		unsigned int j;
-
-		for (j = 0; j < part->ept_meta_nr_pages; j++) {
-			if (PageHead(part->ept_meta_pages[j]))
-				__free_pages(part->ept_meta_pages[j],
-					     compound_order(part->ept_meta_pages[j]));
-			else if (!PageTail(part->ept_meta_pages[j]))
-				__free_page(part->ept_meta_pages[j]);
-			/* tail pages freed implicitly with their head */
+		list_for_each_entry_safe(allocation, tmp,
+					 &part->ept_meta_allocations, list) {
+			list_del(&allocation->list);
+			__free_pages(allocation->head, allocation->order);
+			kfree(allocation);
 		}
-		kfree(part->ept_meta_pages);
 	}
 
 	/* Free kernel-allocated DomainComm pages (compound allocation).
@@ -108,9 +101,9 @@ static void thhv_partition_destroy(struct kref *ref)
 		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
 			int rv;
 
-			rv = themis_revoke_mem(sc->parent_handle, sc->sub_handle);
+			rv = themis_revoke(sc->parent_handle, sc->sub_handle);
 			if (rv)
-				pr_warn("thhv: REVOKE_MEM parent=%llu sub=%llu failed (%d)\n",
+				pr_warn("thhv: REVOKE parent=%llu sub=%llu failed (%d)\n",
 					sc->parent_handle, sc->sub_handle, rv);
 			list_del(&sc->list);
 			kfree(sc);
@@ -120,16 +113,6 @@ static void thhv_partition_destroy(struct kref *ref)
 
 	/* Release all irqfd entries (removes waitqueue entries, flushes work). */
 	thhv_irqfd_release_all(part);
-
-	/* Free ioeventfd entries (no unregister — domain already being torn down). */
-	{
-		struct thhv_ioeventfd_entry *e, *etmp;
-		list_for_each_entry_safe(e, etmp, &part->ioeventfds.list, node) {
-			list_del(&e->node);
-			eventfd_ctx_put(e->eventfd);
-			kfree(e);
-		}
-	}
 
 	kfree(part);
 }
@@ -144,6 +127,13 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 	int ret;
 
 	switch (cmd) {
+	case THHV_SEND_CAP: {
+		struct thhv_send_cap args;
+
+		if (copy_from_user(&args, uarg, sizeof(args)))
+			return -EFAULT;
+		return themis_send(args.handle, part->domain_handle, args.attrs);
+	}
 	case THHV_SEND_SHARED_META: {
 		struct thhv_initialize_partition ip;
 
@@ -157,8 +147,10 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 		if (!ip.meta_uaddr || (ip.meta_uaddr & ~PAGE_MASK))
 			return -EINVAL;
+		if (ip.apic_access_uaddr || ip.apic_access_size)
+			return -EINVAL;
 
-		/* Pin shared META pages (MSR bitmap + IO bitmaps). */
+		/* Pin domain-wide META pages before VP creation. */
 		part->shared_meta_pages = kcalloc(THHV_META_PAGES_SHARED,
 						  sizeof(struct page *),
 						  GFP_KERNEL);
@@ -182,11 +174,11 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		part->shared_meta_nr_pages = THHV_META_PAGES_SHARED;
 
 		/*
-		 * CARVE + SEND shared META pages (MSR bitmap + IO bitmaps)
+		 * CARVE + SEND domain-wide META pages
 		 * to child domain.  The capavisor adds them to the domain's
 		 * frame allocator (GiveMetaMem update).
 		 * Must be done BEFORE CREATE_VP so ADD_VP can allocate the
-		 * MSR bitmap from the META pool.
+		 * per-VP resources from the META pool.
 		 */
 		ret = thhv_send_meta_pages(part, part->shared_meta_pages,
 					   THHV_META_PAGES_SHARED,
@@ -202,153 +194,6 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		pr_debug("thhv: sent %u shared META pages for domain 0x%llx\n",
 			 part->shared_meta_nr_pages, part->domain_handle);
 
-		/*
-		 * APIC-access sentinel page: pinned from CHV userspace, CARVEd
-		 * from dom0's memory, and SEND_AT to the child domain at GPA
-		 * THHV_LAPIC_GPA (0xFEE00000).  The capavisor's ChangeRights
-		 * handler detects this GPA and stores the HPA as apic_access_phys
-		 * for the VMCS APIC_ACCESS_ADDR field.  EPT META pages are also
-		 * allocated here to back the EPT page-table entries for this GPA.
-		 */
-		if (!ip.apic_access_uaddr || (ip.apic_access_uaddr & ~PAGE_MASK))
-			return -EINVAL;
-		if (ip.apic_access_size != PAGE_SIZE)
-			return -EINVAL;
-
-		{
-			u64 hpa, parent_handle, cap_handle, cap_sub;
-			struct page **ept_pages;
-			unsigned int nr_ept_meta, j;
-			struct thhv_sent_cap *sc;
-
-			/* Pin the APIC-access page. */
-			part->apic_access_pages = kcalloc(1, sizeof(struct page *),
-							  GFP_KERNEL);
-			if (!part->apic_access_pages)
-				return -ENOMEM;
-
-			ret = pin_user_pages_fast(ip.apic_access_uaddr, 1,
-						  FOLL_WRITE | FOLL_LONGTERM,
-						  part->apic_access_pages);
-			if (ret != 1) {
-				kfree(part->apic_access_pages);
-				part->apic_access_pages = NULL;
-				return ret < 0 ? ret : -EFAULT;
-			}
-			part->apic_access_nr_pages = 1;
-
-			/* Translate to HPA. */
-			hpa = thhv_gpa_to_hpa(
-				(u64)page_to_pfn(part->apic_access_pages[0]) << PAGE_SHIFT);
-			if (hpa == (u64)-1) {
-				pr_err("thhv: APIC-access page HPA translation failed\n");
-				return -EFAULT;
-			}
-
-			/* Send EPT META pages for GPA THHV_LAPIC_GPA. */
-			nr_ept_meta = thhv_ept_meta_needed(THHV_LAPIC_GPA, PAGE_SIZE);
-			ept_pages = kcalloc(nr_ept_meta, sizeof(struct page *),
-					    GFP_KERNEL);
-			if (!ept_pages)
-				return -ENOMEM;
-
-			{
-				unsigned int order = get_order(nr_ept_meta * PAGE_SIZE);
-				struct page *compound = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
-				if (!compound) {
-					kfree(ept_pages);
-					return -ENOMEM;
-				}
-				for (j = 0; j < nr_ept_meta; j++)
-					ept_pages[j] = compound + j;
-			}
-
-			ret = thhv_send_meta_pages(part, ept_pages, nr_ept_meta,
-						   THHV_META_KEY_EPT);
-			if (ret) {
-				__free_pages(ept_pages[0], get_order(nr_ept_meta * PAGE_SIZE));
-				kfree(ept_pages);
-				pr_err("thhv: APIC-access EPT META send failed (%d)\n", ret);
-				return ret;
-			}
-
-			/* Accumulate EPT META pages for cleanup. */
-			if (part->ept_meta_pages) {
-				struct page **merged;
-				unsigned int total = part->ept_meta_nr_pages + nr_ept_meta;
-
-				merged = krealloc(part->ept_meta_pages,
-						  total * sizeof(struct page *),
-						  GFP_KERNEL);
-				if (!merged) {
-					kfree(ept_pages);
-					return -ENOMEM;
-				}
-				memcpy(merged + part->ept_meta_nr_pages, ept_pages,
-				       nr_ept_meta * sizeof(struct page *));
-				kfree(ept_pages);
-				part->ept_meta_pages = merged;
-				part->ept_meta_nr_pages = total;
-			} else {
-				part->ept_meta_pages = ept_pages;
-				part->ept_meta_nr_pages = nr_ept_meta;
-			}
-
-			/* CARVE the APIC-access page from dom0's memory. */
-			ret = thhv_find_parent_handle(hpa, PAGE_SIZE, &parent_handle);
-			if (ret) {
-				pr_err("thhv: APIC-access page HPA 0x%llx: no parent cap\n", hpa);
-				return ret;
-			}
-
-			ret = themis_carve(parent_handle, hpa, PAGE_SIZE,
-					   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
-					   &cap_handle, &cap_sub);
-			if (ret) {
-				pr_err("thhv: APIC-access CARVE failed (%d)\n", ret);
-				return ret;
-			}
-
-			ret = thhv_cap_table_insert(cap_handle, parent_handle,
-						    cap_sub, hpa, PAGE_SIZE);
-			if (ret) {
-				themis_revoke_mem(parent_handle, cap_sub);
-				return ret;
-			}
-
-			/* SEND_AT to child domain at GPA THHV_LAPIC_GPA.
-			 * The capavisor ChangeRights handler records HPA as
-			 * apic_access_phys when it sees address == THHV_LAPIC_GPA. */
-			ret = themis_send_at(cap_handle, part->domain_handle,
-					     0 /* no special attrs */,
-					     THHV_LAPIC_GPA);
-			if (ret) {
-				themis_revoke_mem(parent_handle, cap_sub);
-				thhv_cap_table_remove(cap_handle);
-				pr_err("thhv: APIC-access SEND_AT failed (%d)\n", ret);
-				return ret;
-			}
-			/* After SEND_AT the sender's cap slot is consumed; remove
-			 * from cap_table so the capa engine can reuse the handle. */
-			thhv_cap_table_remove(cap_handle);
-
-			/* Track capability for revocation on teardown. */
-			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
-			if (!sc) {
-				themis_revoke_mem(parent_handle, cap_sub);
-				thhv_cap_table_remove(cap_handle);
-				return -ENOMEM;
-			}
-			sc->parent_handle = parent_handle;
-			sc->sub_handle    = cap_sub;
-			sc->region_key    = THHV_LAPIC_GPA >> PAGE_SHIFT;
-			spin_lock(&part->sent_caps.lock);
-			list_add_tail(&sc->list, &part->sent_caps.list);
-			spin_unlock(&part->sent_caps.lock);
-
-			pr_debug("thhv: APIC-access page HPA 0x%llx mapped at GPA 0x%llx for domain 0x%llx\n",
-				 hpa, THHV_LAPIC_GPA, part->domain_handle);
-		}
 		return 0;
 	}
 
@@ -396,18 +241,6 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		if (args.flags & THHV_IRQFD_FLAG_DEASSIGN)
 			return thhv_irqfd_deassign(part, irq);
 		return thhv_irqfd_assign(part, irq);
-	}
-
-	case THHV_IOEVENTFD: {
-		struct thhv_ioeventfd __user *ioe = uarg;
-		struct thhv_ioeventfd args;
-
-		if (copy_from_user(&args, ioe, sizeof(args)))
-			return -EFAULT;
-
-		if (args.flags & THHV_IOEVENTFD_FLAG_DEASSIGN)
-			return thhv_ioeventfd_deassign(part, ioe);
-		return thhv_ioeventfd_assign(part, ioe);
 	}
 
 	case THHV_SET_MSI_ROUTING:
@@ -485,15 +318,13 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 
 	spin_lock_init(&part->mem.lock);
 	part->mem.regions = RB_ROOT;
+	INIT_LIST_HEAD(&part->ept_meta_allocations);
 
 	spin_lock_init(&part->sent_caps.lock);
 	INIT_LIST_HEAD(&part->sent_caps.list);
 
 	INIT_LIST_HEAD(&part->irqfds.list);
 	mutex_init(&part->irqfds.lock);
-
-	INIT_LIST_HEAD(&part->ioeventfds.list);
-	mutex_init(&part->ioeventfds.lock);
 
 	/* Allocate VP pointer array (populated lazily by CREATE_VP). */
 	part->vps = kcalloc(cp.num_vps, sizeof(*part->vps), GFP_KERNEL);
@@ -530,9 +361,9 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 			pr_err("thhv: GET_CHAN(self) failed (%d)\n", ret);
 			goto err_revoke;
 		}
-		ret = themis_send_chan(chan, part->domain_handle, 0);
+		ret = themis_send(chan, part->domain_handle, 0);
 		if (ret) {
-			pr_err("thhv: SEND_CHAN failed (%d)\n", ret);
+			pr_err("thhv: SEND channel failed (%d)\n", ret);
 			goto err_revoke;
 		}
 		part->chan_handle = chan;
@@ -541,7 +372,7 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 
 	/*
 	 * Provision per-domain DomainComm pages: allocate 4 kernel pages,
-	 * CARVE each from dom0's memory, and SEND to the child with the
+	 * CARVE each from this domain's memory, and SEND to the child with the
 	 * COMM attribute.  The capavisor accumulates the HPAs and
 	 * initialises the child's DomainComm ring at seal time.
 	 * After SEND, the caps belong to the child (identity-mapped,
@@ -567,82 +398,35 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 		}
 		for (i = 0; i < DOMCOMM_NR_PAGES; i++)
 			dc_pages[i] = dc_compound + i;
+		part->domcomm_pages = dc_pages;
+		part->domcomm_nr_pages = DOMCOMM_NR_PAGES;
 
-		/*
-		 * Since domcomm pages are now contiguous, only one EPT META
-		 * computation is needed for the whole block.
-		 */
+		/* Size META for the actual child addresses, not this Linux GPA. */
 		{
-			u64 dc_base_gpa = (u64)page_to_pfn(dc_compound) << PAGE_SHIFT;
-			unsigned int nr_dc_meta = thhv_ept_meta_needed(
-				dc_base_gpa, DOMCOMM_NR_PAGES * PAGE_SIZE);
-			struct page **dc_meta;
-			struct page *dc_meta_compound;
+			unsigned int nr_dc_meta = 0;
 			unsigned int j;
 
-			dc_meta = kcalloc(nr_dc_meta, sizeof(*dc_meta),
-					  GFP_KERNEL);
-			if (!dc_meta) {
-				ret = -ENOMEM;
-				goto err_free_domcomm_pages;
-			}
+			for (j = 0; j < DOMCOMM_NR_PAGES; j++) {
+				u64 gpa = (u64)page_to_pfn(dc_pages[j]) << PAGE_SHIFT;
+				u64 hpa = thhv_gpa_to_hpa(gpa);
 
-			if (nr_dc_meta > 0) {
-				unsigned int meta_order = get_order(nr_dc_meta * PAGE_SIZE);
-
-				dc_meta_compound = alloc_pages(GFP_KERNEL | __GFP_ZERO,
-							       meta_order);
-				if (!dc_meta_compound) {
-					kfree(dc_meta);
-					ret = -ENOMEM;
+				if (hpa == (u64)-1) {
+					ret = -EFAULT;
 					goto err_free_domcomm_pages;
 				}
-				for (j = 0; j < nr_dc_meta; j++)
-					dc_meta[j] = dc_meta_compound + j;
+				nr_dc_meta += thhv_ept_meta_needed(hpa, PAGE_SIZE);
 			}
-
-			ret = thhv_send_meta_pages(part, dc_meta, nr_dc_meta,
-						   THHV_META_KEY_EPT);
-			if (ret) {
-				if (nr_dc_meta > 0)
-					__free_pages(dc_meta[0],
-						     get_order(nr_dc_meta * PAGE_SIZE));
-				kfree(dc_meta);
+			ret = thhv_send_ept_meta(part, nr_dc_meta);
+			if (ret)
 				goto err_free_domcomm_pages;
-			}
-
-			/* Track META pages for teardown. */
-			if (part->ept_meta_pages) {
-				struct page **merged;
-				unsigned int total = part->ept_meta_nr_pages +
-						     nr_dc_meta;
-
-				merged = krealloc(part->ept_meta_pages,
-						  total * sizeof(struct page *),
-						  GFP_KERNEL);
-				if (!merged) {
-					kfree(dc_meta);
-					ret = -ENOMEM;
-					goto err_free_domcomm_pages;
-				}
-				memcpy(merged + part->ept_meta_nr_pages,
-				       dc_meta,
-				       nr_dc_meta * sizeof(struct page *));
-				kfree(dc_meta);
-				part->ept_meta_pages = merged;
-				part->ept_meta_nr_pages = total;
-			} else {
-				part->ept_meta_pages = dc_meta;
-				part->ept_meta_nr_pages = nr_dc_meta;
-			}
 
 			pr_debug("thhv: sent %u EPT META pages for domcomm\n",
 				 nr_dc_meta);
 		}
 
-		/* Single CARVE + SEND for the contiguous domcomm block. */
-		{
-			u64 gpa = (u64)page_to_pfn(dc_compound) << PAGE_SHIFT;
+		/* Linux-contiguous pages need not have contiguous host backing. */
+		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
+			u64 gpa = (u64)page_to_pfn(dc_pages[i]) << PAGE_SHIFT;
 			u64 hpa = thhv_gpa_to_hpa(gpa);
 			u64 parent_handle, carved_handle, sub;
 			struct thhv_sent_cap *sc;
@@ -654,8 +438,7 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 				goto err_free_domcomm;
 			}
 
-			ret = thhv_find_parent_handle(hpa,
-						      DOMCOMM_NR_PAGES * PAGE_SIZE,
+			ret = thhv_find_parent_handle(hpa, PAGE_SIZE,
 						      &parent_handle);
 			if (ret) {
 				pr_err("thhv: domcomm block: no parent cap for HPA %#llx\n",
@@ -663,11 +446,16 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 				goto err_free_domcomm;
 			}
 
-			ret = themis_carve(parent_handle, hpa,
-					   DOMCOMM_NR_PAGES * PAGE_SIZE,
+			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+			if (!sc) {
+				ret = -ENOMEM;
+				goto err_free_domcomm;
+			}
+			ret = themis_carve(parent_handle, hpa, PAGE_SIZE,
 					   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
 					   &carved_handle, &sub);
 			if (ret) {
+				kfree(sc);
 				pr_err("thhv: domcomm block: CARVE failed (%d)\n",
 				       ret);
 				goto err_free_domcomm;
@@ -677,18 +465,13 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 					  part->domain_handle,
 					  THHV_MEM_A_COMM);
 			if (ret) {
+				kfree(sc);
 				pr_err("thhv: domcomm block: SEND COMM failed (%d)\n",
 				       ret);
-				themis_revoke_mem(parent_handle, sub);
+				themis_revoke(parent_handle, sub);
 				goto err_free_domcomm;
 			}
 
-			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
-			if (!sc) {
-				pr_err("thhv: domcomm sent_cap alloc failed\n");
-				ret = -ENOMEM;
-				goto err_free_domcomm;
-			}
 			sc->parent_handle = parent_handle;
 			sc->sub_handle    = sub;
 			sc->region_key    = hpa >> PAGE_SHIFT;
@@ -706,8 +489,6 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 		goto domcomm_done;
 err_free_domcomm_pages:
 err_free_domcomm:
-		__free_pages(dc_compound, DOMCOMM_ORDER);
-		kfree(dc_pages);
 		goto err_revoke;
 domcomm_done:
 		;
@@ -737,7 +518,8 @@ domcomm_done:
 err_put_fd:
 	put_unused_fd(fd);
 err_revoke:
-	themis_revoke_domain(part->domain_handle);
+	kref_put(&part->refcount, thhv_partition_destroy);
+	return ret;
 err_free_vps:
 	kfree(part->vps);
 err_free_part:

@@ -1,12 +1,12 @@
 //! VP (Virtual-Processor) hypercalls.
 //!
-//! - REGISTER_COMM (0x18): bind a memory capability as a child VP's COMM page.
+//! - REGISTER_COMM (0x18): bind a child VP COMM page or self DomainComm backing.
 //! - ADD_VP (0x14): allocate VMCS/VAPIC/PID for a new child VP.
 //! - GET_REG / SET_REG (0x0E / 0x0F): read/write a single VP register via the
 //!   capability engine + `ThemisPlatform::{get,set}_vp_register`.
 //!
-//! All four operate on a child domain's VPs; register access is mediated by the
-//! engine's read-/write-bitmaps and `MonitorAPI::{GET,SET}` checks.
+//! Register access is mediated by the engine's read-/write-bitmaps and
+//! `MonitorAPI::{GET,SET}` checks.
 
 use capability_engine::{Capability, CapaError, CapabilityRef, Domain};
 
@@ -15,7 +15,8 @@ use crate::platform::ThemisPlatform;
 
 /// REGISTER_COMM (0x18): register a COMM page bound to a child domain's VP.
 ///
-/// IN:  RDI = mem_cap_handle, RSI = child_domain_handle, RDX = vp_id
+/// IN:  RDI = mem_cap_handle, RSI = child_domain_handle, RDX = vp_id.
+/// SELF_CAPABILITY + u32::MAX selects domain-level self COMM.
 pub(super) fn do_register_comm(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -23,12 +24,13 @@ pub(super) fn do_register_comm(
     child_domain_handle: u64,
     vp_id: u64,
 ) -> Result<HypercallResult, CapaError> {
+    let vp_id = u32::try_from(vp_id).map_err(|_| CapaError::InvalidValue)?;
     let _batch = Capability::register_comm(
         platform,
         caller,
         mem_cap_handle,
         child_domain_handle,
-        vp_id as u32,
+        vp_id,
     )?;
     Ok(HypercallResult::success())
 }

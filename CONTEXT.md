@@ -240,6 +240,10 @@ timing with systemd unit files when `/dev/vdb` directly was sufficient.
 When debugging: **read the diff between the working and broken configuration
 first**, before reasoning about internals.
 
+For Themis and its Linux integration, use small, generic security primitives.
+Build richer protocols above them; protocol details that do not affect the
+security guarantees do not belong in the capability engine.
+
 ---
 
 ## 2. Design Decisions (Settled — Do Not Relitigate)
@@ -293,7 +297,8 @@ capability-v5/
 │   │   ├── thhv_part.c         # Partition lifecycle + ioctl dispatch
 │   │   ├── thhv_vp.c           # VP lifecycle + RUN_VP loop
 │   │   ├── thhv_hvcall.c       # VMCALL wrappers (themis_switch, inject_interrupt…)
-│   │   ├── thhv_ioeventfd.c    # IOEVENTFD: doorbell → eventfd signal
+│   │   ├── thhv_rx.c           # DomainComm RX dispatch
+│   │   ├── thhv_doorbell.c     # Capability endpoints and eventfd subscriptions
 │   │   └── thhv_irqfd.c        # IRQFD: eventfd → INJECT_INTERRUPT VMCALL
 │   └── build-guest.sh          # Build thhv.ko + test bins; copy to dom0 disk
 │
@@ -311,31 +316,56 @@ capability-v5/
 
 | Constant | Number | Description |
 |----------|--------|-------------|
-| `THEMIS_CREATE_DOMAIN`     | 0x01 | Create child domain (returns capability handle) |
-| `THEMIS_CARVE_MEM`         | 0x02 | Carve memory into child domain |
-| `THEMIS_SEND_MEM`          | 0x03 | Send (alias) memory to child domain |
-| `THEMIS_SEAL_DOMAIN`       | 0x04 | Seal domain (programs VMCS, IRTEs, IOMMU) |
-| `THEMIS_SWITCH`            | 0x05 | Synchronous domain switch (RUN child VP) |
-| `THEMIS_REVOKE_DOMAIN`     | 0x06 | Revoke child domain (tears down EPT, SLPT, IRTEs) |
-| `THEMIS_ADD_VP`            | 0x08 | Add VP to domain |
-| `THEMIS_GET_REG`           | 0x09 | Get VP register (via COMM page) |
-| `THEMIS_SET_REG`           | 0x0A | Set VP register (via COMM page) |
-| `THEMIS_REGISTER_DOORBELL` | 0x10 | Register EPT-violation doorbell fast-path |
-| `THEMIS_REVOKE_MEM`        | 0x11 | Revoke memory capability |
+| `THEMIS_CARVE`             | 0x01 | Carve a memory capability |
+| `THEMIS_ALIAS`             | 0x02 | Alias a memory capability |
+| `THEMIS_SEND`              | 0x03 | Send a capability; engine resolves its type |
+| `THEMIS_ACCEPT`            | 0x04 | Accept a pending capability |
+| `THEMIS_REJECT`            | 0x05 | Reject a pending capability |
+| `THEMIS_CREATE_DOMAIN`     | 0x06 | Create child domain (returns capability handle) |
+| `THEMIS_SEAL`              | 0x07 | Seal domain (programs VMCS, IRTEs, IOMMU) |
+| `THEMIS_REVOKE`            | 0x08 | Revoke a tree child; engine resolves its type |
+| `THEMIS_SWITCH`            | 0x0A | Synchronous domain switch (RUN child VP) |
+| `THEMIS_GET_REG`           | 0x0E | Get VP register |
+| `THEMIS_SET_REG`           | 0x0F | Set VP register |
 | `THEMIS_ASSIGN_DEVICE`     | 0x12 | Assign PCI device to child domain (IOMMU) |
+| `THEMIS_ENUMERATE`         | 0x13 | Find a pending offer, independent of type |
+| `THEMIS_ADD_VP`            | 0x14 | Add VP to domain |
 | `THEMIS_RELEASE_DEVICE`    | 0x1A | Release PCI device back to dom0 |
 | `THEMIS_INJECT_INTERRUPT`  | 0x1B | Inject interrupt via Posted Interrupt Descriptor |
+| `THEMIS_CREATE_DOORBELL`   | 0x24 | Create immutable endpoint for self or owned unsealed child |
+| `THEMIS_NOTIFY`            | 0x25 | Invoke a held doorbell capability |
 
 ---
 
-## 5. IOEVENTFD / IRQFD Flow
+## 5. Doorbells / Device Events / IRQFD
 
-### IOEVENTFD (guest → VMM notification)
-1. Guest writes to doorbell GPA → EPT violation in capavisor
-2. `handle_ept_doorbell` matches GPA, writes `DoorbellNotify` to parent DomainComm RX ring,
-   advances child RIP, resumes child immediately
-3. `thhv_vp.c`: after `themis_switch` returns, `thhv_drain_domcomm_rx(part)` is called
-4. Driver matches `DOMCOMM_MSG_DOORBELL_NOTIFY` → `eventfd_signal` wakes VMM worker thread
+### Capability doorbells (domain → recipient)
+1. Create immutable `Doorbell { recipient, port_id, vector, kind }`, a child
+   of the recipient domain capability. Kind is Sync or Async { vp_id }.
+2. Transfer invocation authority through ordinary SEND/ACCEPT. REVOKE
+   destroys authority; reclaim never transfers it back.
+3. `NOTIFY(handle, value)` validates ownership, effective Deliver and injectable.
+   Sync selects the blocked recipient VP from the active caller chain and
+   reuses interrupt unwind/resumption; an off-chain target is an error.
+   Async posts to its stored VP without CPU return or scheduling guarantee.
+4. DomainComm event 8 carries `(port, value)`; thhv dispatches mutable eventfd
+   subscriptions separately from capability lifetime. The driver reserves
+   one common interrupt vector on every online CPU and disables CPU hotplug
+   while registered.
+
+Attestation inventories recipient-tree objects and held invocation handles.
+The 40-byte report header has `nr_doorbells` at offset 36 and flag 4;
+40-byte doorbell entries follow the PA map and precede the signed envelope.
+Retired notification-format flag 2 is rejected. Monitor and consumers must
+be rebuilt together.
+See [doorbell semantics](docs/capability-engine/semantics.md#doorbell-capabilities)
+and [DomainComm encoding](docs/domain-comm.md#domcomm_msg_attest--binary-attestation-report).
+
+### Ordinary device notifications
+CHV matches emulated MMIO/PIO writes by address, width and data in userspace
+and signals its retained eventfds. No device-match rule belongs in the
+capability engine or monitor. This standard-device emulation path does not
+provide confidential device services or access to private guest memory.
 
 ### IRQFD (VMM → guest interrupt injection)
 1. VMM writes to eventfd → kernel poll waitqueue wakeup

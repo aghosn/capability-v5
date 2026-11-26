@@ -28,7 +28,7 @@ pub trait ProcFeature: Clone {
 }
 
 /// A policy entry: what action to take for a range of resources.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProcFeaturePolicy<T: ProcFeature> {
     /// Forward exits in this range to the parent domain.
     Trap(T::Range),
@@ -85,6 +85,17 @@ pub struct ProcFeatureConfig<T: ProcFeature> {
     /// Sorted by range start, non-overlapping.
     pub overrides: Vec<ProcFeaturePolicy<T>>,
 }
+
+impl<T: ProcFeature> PartialEq for ProcFeatureConfig<T>
+where
+    ProcFeaturePolicy<T>: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.default == other.default && self.overrides == other.overrides
+    }
+}
+
+impl<T: ProcFeature> Eq for ProcFeatureConfig<T> where ProcFeaturePolicy<T>: Eq {}
 
 impl<T: ProcFeature> ProcFeatureConfig<T> {
     /// Create a new config with the given default and no overrides.
@@ -257,7 +268,7 @@ pub struct CpuidResult {
 }
 
 /// Marker type for the CPUID resource class.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cpuid;
 
 impl ProcFeature for Cpuid {
@@ -281,8 +292,33 @@ impl ProcFeature for Cpuid {
 }
 
 /// Marker type for the MSR resource class.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Msr;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeatureAction<V> {
+    Trap,
+    Native,
+    Emulate(V),
+    EmulateConst(V),
+}
+
+impl<T: ProcFeature> ProcFeatureConfig<T> {
+    pub fn action(&self, key: &T::Input) -> FeatureAction<T::Value> {
+        match self.lookup(key) {
+            Some(ProcFeaturePolicy::Trap(_)) => FeatureAction::Trap,
+            Some(ProcFeaturePolicy::Native(_)) => FeatureAction::Native,
+            Some(ProcFeaturePolicy::Emulate(_, value)) => FeatureAction::Emulate(value.clone()),
+            Some(ProcFeaturePolicy::EmulateConst(_, value)) => {
+                FeatureAction::EmulateConst(value.clone())
+            }
+            None => match self.default {
+                DefaultAction::Trap => FeatureAction::Trap,
+                DefaultAction::Native => FeatureAction::Native,
+            },
+        }
+    }
+}
 
 impl ProcFeature for Msr {
     type Input = u32;

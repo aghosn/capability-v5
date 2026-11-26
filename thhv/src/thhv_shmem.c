@@ -116,8 +116,8 @@ static long shmem_create(struct thhv_partition *part,
 		if (ret) {
 			int j;
 			for (j = 0; j < i; j++)
-				themis_revoke_mem(parent_handle,
-						 entry->aliases[j].sub_handle);
+				themis_revoke(parent_handle,
+					      entry->aliases[j].sub_handle);
 			entry->used = false;
 			mutex_unlock(&shmem_lock);
 			return ret;

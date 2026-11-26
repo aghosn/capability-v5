@@ -7,6 +7,2649 @@
 
 ## Current Status
 
+- **Parent review checkpoint (DONE):** Included this final handoff with the
+  reviewed engine, CLI, capavisor, driver, ABI, policies, workloads and docs,
+  plus CHV pinned at ef73ea57b. Validation results are recorded below.
+  Next: review the existing ../linux modifications, specifically what can
+  move into thhv instead of intrusive Linux hooks. Linux changes remain
+  uncommitted and untouched by this parent checkpoint. Dom2 stays deferred.
+  Files modified: todo.md (final checkpoint/next-review handoff).
+
+- **Parent CHV pointer staging (DONE):** Staged cloud-hypervisor at
+  ef73ea57bb45c38fa752cc4023eeb0790b5cd09a. Verified the index matches CHV
+  HEAD, staged diff --check passes, and unrelated staging is unchanged.
+  No parent commit or push. Files modified: todo.md (unstaged handoff).
+
+- **CHV staging and commit (DONE):** Committed all 27 reviewed CHV files as
+  ef73ea57b (`themis: add capability-based PV device and CPU services`).
+  Includes the PV transport/device-memory/AP firmware work, review fixes,
+  seccomp integration, diagnostic cleanup and strict Clippy fixes. Existing
+  test/build/boot results are recorded below; commit-time diff --check PASS.
+  CHV worktree clean. Parent staging unchanged (eda83fcc...8cf992c); its
+  updated CHV submodule pointer is deliberately unstaged. No parent commit
+  or push. Files modified: todo.md (this unstaged commit handoff).
+
+- **CHV strict Clippy cleanup (DONE; UNSTAGED):** Fixed all 33
+  diagnostics in the Themis backend and its tests. Mechanical fixes complete,
+  no lint suppressions or JSON schema changes. Strict Clippy with
+  `-p hypervisor --features themis,kvm --all-targets -- -D warnings` and all
+  73 backend tests PASS. Uppercase ALL/NONE JSON parsing/serialization is
+  preserved and checked in the existing interrupt-policy regression.
+  Fix-only delta reviewed against a snapshot of the dirty worktree.
+  Full release build-bins PASS. Original bins.img and toggle-debug restored
+  and cmp-verified; bins SHA256 remains 09e6f00d...f21bb17. Temporary source
+  snapshots/artifact backups removed. No additional boots for this
+  behavior-preserving lint cleanup; the earlier final standard/confidential
+  boot results remain recorded below. Existing staging preserved
+  (eda83fcc...8cf992c), CHV index empty; no commits.
+  Logs: /tmp/chv-clippy-cleanup-{before,fix,final,tests,build}.log;
+  fix-only delta: /tmp/chv-clippy-cleanup-final.patch.
+  Files modified: CHV hypervisor/src/themis/{abi,config,emulator,
+  hypervisor_impl,mod,policy_walker,pv,vcpu,vm_impl}.rs (derived defaults,
+  internal enum naming with explicit serde casing, redundant conversions/
+  closures, range checks, formatting and test assertions); todo.md (handoff).
+
+- **ABI/docs follow-up staging (DONE):** Staged the reviewed timer ABI and
+  configuration documentation updates in themis/crates/themis-abi/ and docs/.
+  Verified no unstaged changes remain in either path, staged diff --check
+  passes, and unrelated staging/HEAD are unchanged. CHV index remains empty.
+  No commit. Files modified: todo.md (this unstaged staging handoff).
+
+- **CHV review fixes (DONE; new edits UNSTAGED):** Addressed the four
+  review findings: guest-configured deadline timer delivery and real TSC
+  frequency discovery/calibration; CPUID-identity IPI routing; actual
+  cores/shared-RAM/Native+Trap CPUID policy application; removal/gating of
+  temporary diagnostic chatter. New timer worker is stopped/joined on
+  teardown. All 73 focused CHV regressions and isolated VMM/vCPU seccomp
+  filter tests pass. Seccomp now derives ioctl values from the actual backend
+  ABI, allows the current launch/doorbell/injection operations, and permits
+  timer rearming on vCPU threads. Strict Clippy initially found backend lint
+  debt, resolved by the subsequent mechanical cleanup recorded above.
+  Coordinated timer ABI change retires PV opcode 9, adds deadline operation
+  10 (requires previously published timer settings) and LVT update 11.
+  Matching guest kernel build completed successfully in ../linux. User
+  approved that checkout change; thhv itself is unchanged in this task.
+  For the later Linux review, explicitly reconsider which
+  existing Linux integration hooks can live in thhv instead of the kernel.
+  New Linux edits: arch/x86/kernel/cpu/themis_pv.c (publish timer settings),
+  arch/x86/include/asm/themis_platform.h (declaration), and
+  arch/x86/include/asm/apic.h (publish timer LVT changes).
+  First live dom0 checks passed, but standard dom1 exposed an incorrect new
+  SIPI pre-check: GET_VP_STATE reads monitor activity, not thhv's software
+  wait-for-SIPI. Removed the pre-check; thhv already rejects duplicate startup
+  batches. No driver change needed. Removed leftover ARCH-DBG
+  startup output and gated ivshmem doorbell notifications at debug level.
+  Confidential boot exposed invalid virtual timer register readback.
+  Simplified PV deadline handling to use its explicitly published LVT state
+  rather than overwrite it from native APIC readback. Nonzero deadlines
+  still fail without prior configuration; no fallback.
+  Final validation PASS: 73 backend tests, isolated seccomp regression,
+  19 ABI unit tests + 2 doc tests, private AP firmware / IOAPIC direct-EOI /
+  shared-MMIO VMM tests, full release build-bins, matching guest kernel,
+  backend formatting and root/CHV/Linux diff --check.
+  Both fresh final monitor cycles PASS with seccomp enabled: dom0 on four
+  CPUs, standard and confidential dom1 on two CPUs. Dom0: eventfd, repeated
+  Sync child teardown, IRQ/HLT, COMM growth, attestation and driver reload.
+  Each Linux dom1: authenticated SSH, disk R/W, network, signed attestation,
+  driver unload/reload and clean VMM shutdown; parent post-child teardown,
+  attestation and reload also pass. Confidential additionally passes shared
+  DMA reservation, three-page RX/TX growth and oversized-growth rejection.
+  Standard growth skipped because its RAM is aliased, not exclusive.
+  No timer/service errors or kernel/monitor BUG, CPU WARNING, Oops or panic
+  signatures in final logs; ordinary image/tap configuration warnings remain.
+  No TPM quote, dom2, live custom-topology/policy or direct physical page
+  accounting coverage claimed. Monitor-local timer emulation and inherited
+  MSI destination routing are outside these CHV legacy-IPI/timer fixes.
+  Owned VMs/helpers stopped; temporary disks and verified backup removed.
+  Original bins.img restored and cmp/SHA256 verified (09e6f00d...f21bb17);
+  generated toggle-debug executable diff removed. No temporary production
+  debug instrumentation remains from this task; useful errors are retained.
+  Logs: /tmp/chv-fixes-{tests,abi-tests,seccomp-tests,platform-tests,
+  build-bins-final,kernel-build,live-boots}.log and
+  /tmp/chv-fixes-{standard,confidential}-live-*.
+  Files modified for these fixes:
+  - CHV hypervisor/src/themis/{config,hypervisor_impl,policy_walker,vm_state}.rs
+    and defaults/confidential.json: apply configured cores, CPUID and shared RAM.
+  - CHV hypervisor/src/themis/{timer,vcpu,vm_impl,pv,consts}.rs: owned timer
+    worker, actual frequency/vector/mask, APIC-identity IPI and targeted SIPI.
+  - CHV hypervisor/src/themis/{abi,mod}.rs and vmm/src/seccomp_filters.rs:
+    reuse current ABI ioctl constants and test actual restrictive filters.
+  - CHV hypervisor/src/themis/emulator.rs, arch/src/x86_64/regs.rs and
+    vmm/src/device_manager.rs: remove/gate temporary diagnostic output.
+  - themis/crates/themis-abi/src/pv.rs and docs/chv-themis-config.md:
+    coordinated timer operations and implemented configuration semantics.
+  - The three Linux files listed above: publish guest timer state.
+  - todo.md: progress/results and later Linux/driver placement review reminder.
+  Root staging preserved (3bd2aed4...59b44a); CHV index empty. No commits.
+
+- **CHV change review (DONE; source unchanged, UNSTAGED):** Reviewed the
+  tracked changes and four new modules; no confirmed new functional
+  regression or hardcoded domain handle found. Not yet clean enough to
+  call principled: inherited timer code fixes the interrupt vector to
+  Linux's 0xEC (hypervisor/src/themis/vm_impl.rs:122) and guesses a 19.2 MHz
+  crystal or 3 GHz TSC (vcpu.rs:52-104); the new PV timer route reuses this.
+  Legacy fixed IPIs still equate APIC IDs with VP indices (vcpu.rs:1369),
+  unlike the new PV resolver; nonidentity CPU topology can misroute/drop
+  interrupts. Inherited config gaps remain: CPUID Native/Trap overrides
+  are skipped (policy_walker.rs:619), cores_mask is always !0
+  (hypervisor_impl.rs:96), and general.shared_regions has no consumer.
+  These are existing limitations, not regressions attributed to this diff.
+  Unconditional THEMIS-DBG/THEMIS-EXIT/MMIO-DBG and LAPIC trace output
+  remains in vm_state.rs, vm_impl.rs and vcpu.rs; remove or gate diagnostic
+  chatter without removing real error reporting before staging.
+  Validation PASS: 65 Themis hypervisor tests, private AP firmware test,
+  IOAPIC direct-EOI test, shared-MMIO VMM integration test (68 total),
+  and CHV diff --check. Earlier standard/confidential dom1 boots used this
+  CHV source; custom topology/policy behavior was not runtime-tested.
+  Root staged diff remains unchanged (3bd2aed4...59b44a); CHV index empty.
+  No CHV source edits, staging or commits. Files modified: todo.md only
+  (this unstaged review handoff). Test logs: /tmp/chv-final-review-*.log.
+
+- **thhv staging (DONE):** Staged all reviewed thhv/ changes, including
+  the META allocation cleanup fix and new doorbell/RX sources and tests.
+  Verified no unstaged/untracked thhv changes remain, staged diff --check
+  passes, and staging outside thhv/ is unchanged. No commit.
+  Files modified: todo.md (this unstaged staging handoff).
+
+- **thhv META fix live checks + review (DONE):** Both fresh-monitor boot
+  cycles PASS: dom0 + shipped standard dom1, and dom0 + shipped confidential
+  dom1. Guest-side SHA256 verifies the current fixed modules were tested.
+  Dom0 (6.8.0-136, four CPUs): eventfd, four Sync child creation/teardown
+  cycles, HLT, two eight-round IRQ tests, three-page RX/TX growth, oversized
+  rejection, signed attestation and driver reload. After each Linux child
+  exits, another Sync child teardown plus attestation and driver reload PASS
+  (ten Sync child teardown checks total across both monitor boots).
+  Both Linux dom1 profiles (6.19.14+, two CPUs): SSH, disk R/W, network,
+  signed attestation, driver unload/reload and clean VMM shutdown PASS.
+  Confidential additionally passes declared shared DMA reservation and
+  three-page RX/TX growth/oversized rejection; standard growth deliberately
+  skipped because its RAM is aliased, not exclusive. No TPM-quote coverage.
+  Parent/child kernel and monitor logs show no BUG, CPU WARNING, page-ref,
+  Oops or panic signatures. No direct physical page-accounting measurement.
+  thhv inspection is complete for this change set; dom2 remains explicitly
+  deferred and was not created. Matching dom1 module uses the built kernel's
+  vmlinux.symvers via KBUILD_EXTRA_SYMBOLS; import CRCs verified.
+  All owned VMs/helpers stopped; isolated bins copy, dom0 overlay and OVMF
+  variables removed. Original bins.img SHA256 remains 09e6f00d...f21bb17;
+  existing staging unchanged (c763c11e...b496ce0). No new driver source edits,
+  debug code, staging or commits in this validation step.
+  Logs: /tmp/thhv-meta-fix-live-boots.log and
+  /tmp/thhv-meta-fix-{standard,confidential}-live-*.
+  Files modified: todo.md (results/review handoff). Updated only session-local
+  boot/guest runners and matching driver artifacts outside Git.
+
+- **thhv META allocation cleanup (DONE; UNSTAGED):** Replaced per-page EPT
+  META bookkeeping with allocation head/order tracking. Both DomainComm
+  provisioning and SET_GUEST_MEMORY use the same helper, which records
+  ownership before sending META. Whole blocks, including rounded-up unused
+  pages, are freed exactly once after successful domain revocation. Failed
+  SEND retains backing until teardown rather than risking a premature free.
+  Removed the post-SEND tracking-array allocation failure/leak path.
+  Validation PASS: normal and CONFIG_THHV_TEST driver builds, userspace test
+  build, full release cargo build-bins, diff --check. Session-only regression
+  harness exercises the actual helper/cleanup code with strict allocator
+  stubs: mixed orders, non-power-of-two counts, repeated cleanup, failed
+  SEND, all three allocation failures, and preservation of earlier batches.
+  Wrong-order free and late-tracking negative controls both fail as expected.
+  No new VM boots; actual guest allocator reuse is not claimed.
+  Original bins.img restored after packaging writers exited, cmp/SHA256
+  verified (09e6f00d...f21bb17), temporary backup removed. Existing staging
+  unchanged; no commit or production debug code.
+  Files modified: thhv/src/thhv_internal.h (allocation records/list and helper
+  declaration), thhv/src/thhv_part_mem.c (shared allocation/SEND ownership
+  helper and guest-memory caller), thhv/src/thhv_part.c (DomainComm caller,
+  allocation-list initialization and whole-block teardown), todo.md (handoff).
+
+- **thhv change review (DONE; driver unchanged):** Reviewed tracked changes
+  and new doorbell/RX sources and tests. No additional confirmed regression
+  or dom0-only execution dependency found. One inherited cleanup defect
+  remains: EPT META batches use unsplit higher-order alloc_pages without
+  __GFP_COMP (thhv_part.c:434, thhv_part_mem.c:234), but teardown assumes
+  compound metadata and otherwise frees individual pages (thhv_part.c:65-71).
+  Retain/free each allocation head and order once, or allocate independent
+  pages; the current mismatch can leak backing or trip page-ref checks.
+  DomainComm buffer teardown itself frees the correct order. This finding
+  is static, not runtime-reproduced or established as the deferred dom2
+  fault's cause. CONFIG_THHV_TEST driver and userspace test build PASS
+  against guest 6.8.0-136 headers; thhv diff --check PASS.
+  No driver source edits or staging; only this handoff note is new.
+
+- **Staging update (DONE):** User requested staging capa-engine/,
+  themis/crates/themis-abi/ and docs/. Staged all changes in those paths,
+  including the COMM revocation fix and ABI/documentation follow-ups.
+  Verified no unstaged changes remain there and other staged content is
+  unchanged. No commit. This todo.md handoff update remains unstaged.
+
+- **COMM revocation fix + dom0/dom1 boots (DONE; new edits UNSTAGED):**
+  Implemented domain-level SEND(COMM) bindings and moved UncommRegion to
+  revoke_subtree entry, before descendant cleanup as well as local zeroing
+  and access restoration. SEND permits regions with descendants; a third
+  mediated regression exposed this edge after the initial leaf-only fix.
+  All three new regressions and the extended VP cleanup test failed before
+  their respective fixes. Final validation PASS: 382 default tests,
+  472 address_translation tests, all 60 Loom cases, CLI release build,
+  release build-bins and ISO, git diff --check. Engine fmt --check still
+  reports pre-existing formatting differences beginning at attest.rs:96;
+  no formatting sweep performed.
+  Repeated both boot cycles on the final descendant-safe monitor:
+  dom0 PASS on four CPUs, including two eight-round IRQ runs, independent
+  three-page RX/TX growth, oversized rejection, signed attestation and reload.
+  Shipped standard dom1 PASS: Linux 6.19.14+, two online CPUs, authenticated
+  SSH, disk R/W, network, signed attestation and driver unload/reload.
+  Standard growth skipped because aliased RAM is not exclusive.
+  Shipped confidential dom1 PASS: the same guest checks plus declared PV
+  DMA reservation, three-page RX/TX growth and oversized-growth rejection.
+  No relaxed test policy used. Fresh monitor for each profile; both guests,
+  VMMs and outer VMs shut down cleanly. No dom2 created or investigated.
+  No TPM attached; no TPM-quote coverage claimed. Individual COMM cleanup
+  classification/order is regression-tested through applied engine updates;
+  direct live page-content zeroing/reuse was not separately measured.
+  Parent dmesg still logs redundant segment REVOKE(-ENOENT) after whole-domain
+  revocation has already removed those caps; no driver cleanup changes here.
+  Logs: /tmp/comm-fix-{standard,confidential}-final-* and
+  /tmp/comm-fix-{engine-*,cli-build,final-build-bins,final-iso-build}.log.
+  Original bins.img restored separately after packaging writers exited,
+  cmp/SHA256 verified against the backup (09e6f00d...f21bb17).
+  Owned temporary disks removed; no owned VMs/helpers remain.
+  Existing index preserved (cached diff SHA256 a9ae6ded...f1f2dbbe);
+  no staging or commits. No new production debug logging.
+  Files modified: capa-engine/src/domain_api.rs (SEND COMM binding),
+  capa-engine/src/capability.rs (invalidate before all covered reclamation),
+  capa-engine/tests/integration/comm.rs (three regressions + VP ordering),
+  todo.md (handoff). Session-only boot probes/scripts remain outside Git.
+
+- **Debug-artifact inventory (REVIEW ONLY; no cleanup performed):**
+  Added unconditional pre-seal CPUID table logging remains in the dirty
+  cloud-hypervisor submodule, hypervisor/src/themis/vm_state.rs:604-610.
+  thhv/src/thhv_domcomm.c grow[1] through grow[6] progress prints also remain,
+  but predate this change stack (present in HEAD); they are not new test edits.
+  One-off live probes, test policy and matching modules remain in session
+  files/thhv-live; logs are in /tmp. None are in the Git diff.
+  Temporary VM disk copies were deleted and no owned VMs/helpers remain.
+  Existing untracked _2025/dom1-1vcpu-boot-proof.log and testing-posted.md
+  were not created or modified by this live validation; left untouched.
+  Doorbell test sources are intended regression tests, not temporary probes.
+  Files modified for this inventory: todo.md only.
+
+- **Capavisor arbitrary-domain fixes (STAGED; COMM reclamation gaps found):**
+  User requested staging the six files: arch/x86_64/{boot/capa.rs,
+  vmexit/cpuid.rs}, hypercall/{domcomm,vp}.rs, platform/{domain,mod}.rs.
+  Staged only those paths; no commit. This tracker remains unstaged.
+  Follow-up reclamation review: integration_comm passes 24 tests in each
+  default/address_translation configuration, but these check emitted cleanup
+  updates and bindings, not live page zeroing/reuse or complete teardown.
+  Confirmed gaps to fix after review:
+  - SEND with COMM emits CommRegion(vp_id=UINT32_MAX), but does not populate
+    comm_binding. revoke_subtree defaults an absent binding to VP 0, so
+    individual revocation can miss pending/active DomainComm cleanup.
+    Sources: capa-engine/src/domain_api.rs:860-925 and
+    capa-engine/src/capability.rs:565-573; capavisor platform/mod.rs:839-862.
+  - revoke_subtree queues ZeroMemory and parent ChangeRights before
+    UncommRegion. UpdateBatch preserves insertion order and execute applies
+    it in order; channel invalidation is therefore not guaranteed to precede
+    zeroing/restoring access. Sources: capa-engine/src/capability.rs:493-573,
+    src/update.rs:355-359 and src/platform.rs:740-747.
+  Successful self-COMM growth allocations intentionally survive driver unload
+  for domain lifetime; there is no per-region Linux allocator reclamation
+  hook for successful growth revocation. Failed cleanup revoke retains pages
+  rather than freeing possibly live backing.
+  Scope clarification: the confirmed binding/order findings concern revoking
+  an individual COMM region while its domain remains alive, not proof of a
+  full-domain destruction leak. Full domain revocation recursively revokes
+  owned memory, removes the PlatformDomain (dropping all ring bookkeeping),
+  and parent thhv frees initial DomainComm backing/unpins guest RAM.
+  Self-growth pages inside a child's RAM return with that RAM on domain
+  teardown; retaining them across module reload is intentional, not itself
+  a domain-cleanup leak. Live allocator reuse/full nested teardown remains
+  unverified because of the recorded RAM fault; its cause is not established.
+  Logs: /tmp/thhv-comm-reclamation-{default,translated}.log.
+  Files modified for this review: todo.md only (findings/staging handoff).
+
+- **Engine self-COMM fixes (STAGED):** User requested staging, not committing,
+  capa-engine/src/domain_api.rs and capa-engine/tests/integration/comm.rs.
+  Other staging updates are recorded above; existing staged review work
+  is preserved. No commit created. This tracker update remains unstaged.
+
+- **thhv live dom0/dom1 validation (DONE; nested-child failure remains):**
+  User requested both-domain runtime tests after the arbitrary-domain fixes.
+  Isolated writable bins copy + dom0 qcow2 overlay; originals untouched by VMs.
+  Dom0 PASS: 8 IRQ rounds on four CPUs, eventfd --grow, pending-close,
+  Sync child discovery/notify/resume, signed Ed25519 attestation, unload/reload
+  and repeat IRQ/eventfd. No TPM attached, so no TPM-quote coverage claimed.
+  Standard Linux dom1 (6.19.14+, two CPUs) boots and loads thhv successfully;
+  fresh signed 17 KiB attestation verifies nonidentity/scattered HPA mappings.
+  Its shipped NotReport interrupt policy correctly rejects self-doorbells;
+  aliased standard RAM correctly rejects SEND META for a nested child.
+  Session-only private-RAM/PV test policy grants Deliver on vector 37;
+  shipped policies are unchanged. Private dom1 PASS: 8 IRQ rounds on two
+  CPUs, eventfd --grow (including generic child create/transfer/destroy),
+  independent three-page RX and TX growth, oversized growth rejection,
+  signed attestation, pending-close, unload/reload and repeat IRQ/attestation.
+  Debug mmap PASS on nonidentity memory: HPA 0x13916f000 resolves to caller
+  GPA 0x1eb6f000 and reads the expected bytes; MAP_PRIVATE returns EINVAL,
+  unknown HPA returns ENXIO. Growth allocations also have nonidentity and
+  scattered HPAs. Deliberately reordered CPU/VP IDs were not exercised.
+  NOT a complete dom1 pass: after generic child teardown, Linux faults
+  clearing RAM at GPA 0x13650000; separate Sync-child attempt reproduces at
+  GPA 0x913c000. RIP 0xffffffff821e5767 resolves to clear_page_erms,
+  sibling Linux arch/x86/lib/clear_page_64.S:52, EPT qualification 0x182.
+  CHV treats the RAM fault as undeclared confidential MMIO and stops.
+  Exact failure phase/root cause remains unconfirmed; do not claim dom2
+  execution/Sync success. Independent checks above passed before this test.
+  Hypothesis: investigate nested META/COMM backing lifetime and translated
+  parent mappings across provisioning/revocation; do not relax protection.
+  Repeated private launch after earlier child teardown also failed SEND
+  META(-EINVAL); fresh monitor state launches private Linux successfully.
+  Newer kernel removed asm/cpuid.h; use asm/processor.h on both kernels.
+  Dom1 module build requires modules_prepare and the existing vmlinux.symvers
+  via KBUILD_EXTRA_SYMBOLS (no forced loading or suppressed symbol errors).
+  Standard packaging PASS after this portability fix; restored original
+  bins.img separately after all fuse writers exited, cmp/SHA verified.
+  First legacy boot hit CHV debug-stderr EAGAIN on SSH's terminal; redirect
+  stderr to a guest file. Retry boots cleanly and shuts down cleanly.
+  Wait for actual VMM exit after guest poweroff before reusing its TAP.
+  Logs: /tmp/thhv-live-{dom0-*,dom1-*,monitor*.log,build-bins.log};
+  key evidence dom1-{private-tests,isolated-tests,isolated-dmesg,sync,
+  sync-failure-stderr}.log and dom0-final-tests.log. Dom0 IRQ and signed
+  attestation still pass after the nested failure. All owned VMs stopped.
+  Next: agree a focused investigation of the reproducible nested RAM fault.
+  Session files/thhv-live contains matching modules, test-only policy,
+  independent growth/debug-mmap probes and launch scripts.
+  Files modified for this validation: thhv/src/{thhv_main,thhv_domcomm,
+  thhv_doorbell_irq}.c (portable CPUID include); todo.md (runtime handoff).
+
+- **thhv arbitrary-domain fixes (IMPLEMENTED; live results above):**
+  REGISTER_COMM accepts SELF_CAPABILITY + UINT32_MAX for domain-level backing,
+  separate from per-VP COMM, with aligned RW memory and normal SET checks.
+  Removed the boot-only self-domain capability. New mediated with_domain_comm
+  validates ownership/binding and holds the operation lock through adoption.
+  CPUID DomainComm discovery advertises per-page GPA lookup and synchronous
+  growth; domains without a channel no longer receive dom0's locator.
+  Child provisioning translates/sends each page and sizes EPT META using the
+  actual child addresses. Growth prepares mappings/arrays before NOTIFY,
+  preserves unread bytes when capacity changes, and returns completion in
+  registers rather than through the resized RX ring. Successful backing
+  persists across driver reloads; partial multi-page progress is retained and
+  errors are reported. Revoking active backing disables the channel before
+  clearing/freeing memory. Failed revocation retains potentially live backing.
+  Linux CPU-to-native-VP identity is discovered on each online CPU; Async
+  doorbells and the IRQ probe use that mapping. Debug HPA listing translates
+  Linux PFNs; MAP_SHARED debug mmap translates each HPA back to a known GPA.
+  Fixed partial ring-map cleanup and partition-creation error teardown.
+  Validation PASS: engine cargo test (379), address_translation suite (469),
+  all 60 Loom models, themis-abi (19 unit + 2 doc), CLI release build,
+  test-enabled driver/userspace-test build, capavisor release check, final
+  BINS_TARGETS=capavisor,thhv cargo build-bins and git diff --check.
+  Regressions cover child self-registration, multiple self regions alongside
+  VP COMM, nonidentity GPAs, readonly rejection, lock-held callbacks, revoke
+  before lock acquisition and wrapped unread bytes/u32 cursor rollover.
+  Full-workspace cargo fmt --check remains nonclean on pre-existing formatting
+  (first engine difference attest.rs:96; first themis difference aarch64/boot.rs).
+  Rewritten hypercall/domcomm.rs is rustfmt-formatted; no formatting sweep.
+  Added test_doorbell_eventfd --grow to interleave
+  Async notifications, RX/TX growth and fresh attestation on a test-enabled
+  module; regular test invocation is unchanged. Live checks now cover this,
+  test_doorbell_irq and nonidentity debug mmap in both-domain validation
+  above; reordered CPU/VP identities and dom1-to-dom2 isolation remain untested.
+  Both packaging runs preserved/restored the complete bins.img. The final
+  same-shell restore raced packaging teardown; after confirming no remaining
+  image writers, repeated restoration separately and verified cmp/SHA256:
+  09e6f00d9e2b289581ce67fd82eb0ac3c2d11adad29fdeab28f93d6b1f21bb17.
+  Logs: /tmp/thhv-domain-reuse-{engine-default,engine-tests,abi-tests,loom,
+  cli-build,build,final-build,final-check,engine-fmt,themis-fmt}.log.
+  Files modified: capa-engine/src/domain_api.rs and tests/integration/comm.rs
+  (mediated self COMM and regressions); themis/capavisor/src/arch/x86_64/
+  {boot/capa.rs,vmexit/cpuid.rs} (generic boot/discovery); hypercall/{domcomm,vp}.rs
+  (synchronous growth and registration decoding); platform/{domain,mod}.rs
+  (scattered backing, growth and revocation); themis-abi/src/{lib,domcomm}.rs
+  (discovery/completion ABI and tested resize helper); thhv/src/{thhv_domcomm,
+  thhv_hvcall,thhv_internal,thhv_translate,thhv_part,thhv_part_mem,thhv_main,
+  thhv_doorbell,thhv_doorbell_irq}.{c,h} as applicable (driver fixes);
+  thhv/inc/thhv.h (CPU-index contract), thhv/test/test_doorbell_eventfd.c
+  (optional growth test), thhv/README.md and docs/domain-comm.md (contracts/
+  live procedure), todo.md (handoff). All fixes remain unstaged; original
+  index hash unchanged: f3c06f78830304fb97f2dcd414a9351fcafcf34ad3d21b86355f6ac7b3adcbcc.
+  No commit created.
+
+- **thhv grouped review / arbitrary-domain reuse (REVIEW DONE; fixes pending):**
+  Module detection, self-attestation, current domain ID, memory-handle discovery
+  and normal GPA-to-HPA translation are domain-neutral. No driver source edits
+  or staging in this review. Confirmed remaining assumptions:
+  - Ring growth requires an attested self-domain handle
+    (thhv_translate.c:657, thhv_domcomm.c:341); only root boot provisions one
+    (themis/capavisor/src/arch/x86_64/boot/capa.rs:173). Normal child creation
+    does not, and REGISTER_COMM does not resolve the SELF sentinel.
+  - Child DomainComm provisioning and ring growth translate only the first
+    page of a multi-page allocation, then assume contiguous HPAs
+    (thhv_part.c:475, thhv_domcomm.c:362). Linux-contiguous GPAs do not
+    guarantee contiguous host backing in dom1.
+  - Async doorbells validate a Linux CPU index and pass it unchanged as a
+    capability VP index (thhv_doorbell.c:48, thhv_doorbell_irq.c:183).
+    Equality is assumed, not established; native CPUID 0x40000005/subleaf 1
+    exposes the actual current VP identity.
+  - Debug HPA listing actually reports Linux PFNs, and debug mmap uses its
+    HPA argument directly as a guest PFN (thhv_part_mem.c:613,
+    thhv_main.c:545). These debug interfaces assume identity mapping.
+  Also reconfirmed ring-growth lifecycle issue: fallible krealloc/memremap
+  occurs after successful monitor ACK; error cleanup revokes/frees growth
+  pages, and partial mapping returns success (thhv_domcomm.c:452-503).
+  Next step: agree fixes before changing source or staging the driver.
+  Validation: source/diff review only; no new build or dom1 execution.
+  File modified: todo.md only, to preserve review findings; left unstaged.
+
+- **Themis policies walkthrough (DONE):** User accepted and staged
+  themis/policies/{dom1-standard,dom1-pv,dom1-confidential}.json: explicit
+  legacy/PV transports, parent-shared PV resources (4 KiB control per VP,
+  24 MiB I/O), control/platform services and confidential protection/CPUID
+  settings preserved explicitly under whole-section inheritance.
+  Cached whitespace check PASS. No commit created.
+  This tracker update remains unstaged.
+
+- **Follow-up staging:** User requested staging remaining Eunomia workload
+  and documentation changes. eunomia/workloads/revoke/src/main.rs comment
+  cleanup is staged; all workload changes are staged without build artifacts.
+  Include docs/architecture/child-domcomm.md terminology cleanup and the
+  accumulated todo.md updates. Leave testing-posted.md and _2025/ untouched.
+  No commit requested or created.
+
+- **themis-abi walkthrough:** User accepted and staged
+  themis/crates/themis-abi/src/lib.rs, including the legacy revoke-alias
+  removal: unified ownership opcodes, capability-doorbell ABI, YIELD exit,
+  scoped policy selectors/ranges and PV discovery definitions. Cached
+  whitespace check PASS. User also accepted and staged domcomm.rs: v1 ring
+  protocol/helpers, port/value doorbell events and attested doorbell lookup.
+  User accepted and staged new pv.rs (request/completion protocol) and
+  pv/descriptor.rs (resource discovery/layout validation); cached whitespace
+  check PASS. User accepted and staged regs.rs, which only changes the instruction_bytes
+  comment to explain the field is reserved for wire compatibility and the
+  monitor never exports code bytes. All themis-abi files are now staged.
+  User also accepted and staged libthemis/src/{lib,ffi}.rs cleanup follow-ups
+  (remove compatibility helpers and expose unified FFI revoke).
+  Cached whitespace check PASS. All themis/crates changes now staged;
+  driver and related documentation cleanup follow-ups remain unstaged.
+  No commit created; this tracker update remains unstaged.
+
+- **Legacy hypercall-name cleanup (DONE):** Removed Rust/C legacy revoke
+  opcode aliases (including both HC/OP header spellings), send_chan/
+  accept_chan helpers and revoke_mem/revoke_domain hypercall wrappers.
+  Migrated libthemis FFI to themis_revoke(parent, sub), thhv memory cleanup
+  calls to themis_revoke(parent, sub), domain cleanup to
+  themis_revoke(handle, 0), and parent-channel provisioning to themis_send.
+  Numeric hypercall ABI and engine/CLI high-level APIs are unchanged.
+  Source scan finds no removed names in the guest libraries, thhv, Eunomia
+  or CHV. Rebuilt FFI/module symbol tables confirm unified revoke/send/accept.
+  Validation PASS: themis-abi host tests (18 unit + 2 doc), no_std FFI release
+  staticlib build, BINS_TARGETS=capavisor,thhv,eunomia cargo build-bins
+  component builds (capavisor, thhv/module test binaries, all 13 workloads),
+  final BINS_TARGETS=thhv cargo build-bins after the last header alias
+  removal, and git diff --check. Formatting remains nonclean on existing
+  differences starting in themis-abi/src/domcomm.rs:129; no formatting sweep.
+  No live boot. Preserved/restored the complete bins.img around both
+  packaging runs; cmp and SHA256 verify the original image:
+  09e6f00d9e2b289581ce67fd82eb0ac3c2d11adad29fdeab28f93d6b1f21bb17.
+  Both exact temporary image backups removed.
+  Logs: /tmp/themis-legacy-cleanup-{build,final-build,fmt}.log.
+  Files modified: themis/crates/libthemis/src/{lib,ffi}.rs (remove aliases/
+  unified FFI); themis/crates/themis-abi/src/lib.rs and thhv/inc/thhv.h
+  (remove opcode aliases); thhv/src/{thhv_hvcall.c,thhv_internal.h}
+  (remove compatibility wrappers/declarations);
+  thhv/src/{thhv_part,thhv_part_mem,thhv_main,thhv_shmem,thhv_vp,thhv_domcomm}.c
+  (migrate callers and related diagnostics); eunomia/workloads/revoke/src/main.rs
+  and docs/architecture/child-domcomm.md (update related terminology);
+  todo.md (status). Follow-up edits remain unstaged; approved index preserved.
+  No commit created.
+
+- **libthemis walkthrough / SEND_CHAN caller audit:** Checked Rust, C/FFI,
+  CLI, engine, Lean and cloud-hypervisor references after noticing the guest
+  send_chan helper's changed meaning. No Rust callers of libthemis::send_chan.
+  thhv/src/thhv_part.c:363 uses its separate C themis_send_chan wrapper to
+  transfer a freshly created self-channel to a child; the wrapper delegates
+  to generic SEND with the correct argument order. Engine/CLI/Lean send_channel
+  operations already mean channel-capability transfer. No wrong-semantics
+  caller found and no source fix needed. User accepted and staged
+  themis/crates/libthemis/src/lib.rs; cached whitespace check PASS.
+  No commit created; todo.md audit note remains unstaged.
+
+- **Eunomia walkthrough (DONE):** User accepted and staged
+  eunomia/src/domcomm.rs: shared ring-capacity calculation, invalid-ring
+  checks, wrapping cursors and corrected acquire/release fence placement.
+  User also accepted and staged eunomia/src/ivshmem.rs: legacy device
+  doorbells use an MMIO write rather than the removed GPA-based hypercall.
+  User accepted and staged eunomia/workloads/hypercall/src/main.rs, removing
+  checks for the obsolete SEND_CHAN/ACCEPT_CHAN opcodes.
+  User reviewed and staged eunomia/policies/pv/standard.json: standard-profile
+  inheritance, parent-shared control/I/O regions and a synchronous control
+  service channel. User clarified staging only, not committing.
+  User accepted and staged eunomia/workloads/pv/{Cargo.toml,Cargo.lock,build.rs,
+  src/main.rs}: descriptor/attested-doorbell validation and eight VP-0 control
+  round trips per channel, alternating NOTIFY and voluntary return.
+  All Eunomia changes staged; no target/ build artifacts included.
+  Cached whitespace check PASS. No commit created.
+  This review-status update to todo.md remains unstaged.
+
+- **Documentation staging:** User requested staging all pending documentation
+  without a walkthrough: CONTEXT.md, changed docs/ Markdown files,
+  skills/{debugging-dom-boot,running-inside-dom0}.md, themis/README.md,
+  thhv/README.md and todo.md. No source changes included in this action.
+  Leave testing-posted.md and _2025/ untouched. No commit requested.
+
+- [x] **CLI typed ACCEPT fix (DONE):** Both typed CLI ACCEPT methods now
+  check the existing pending-transfer view before calling unified engine
+  ACCEPT. Commands run serially through the backend. Wrong-type requests
+  return an explicit error without consuming the offer; channel handle
+  resolution uses checked lookup rather than indexing. Two regressions
+  reproduced the previous failures and now verify the offer remains pending
+  and can subsequently be accepted by the correct method. Tests set up and
+  transfer capabilities through backend operations, with no direct state
+  mutation. Files: capa-cli/src/rust_backend.rs (checks/tests), todo.md (status).
+  Validation PASS: cargo test --manifest-path capa-cli/Cargo.toml (2 unit
+  regressions and 16 tutorial tests), cargo build --manifest-path
+  capa-cli/Cargo.toml --release, and scoped git diff --check. Two existing
+  dead-code warnings remain. Formatting check remains nonclean on existing
+  differences starting in capa-cli/build.rs; no formatting sweep performed.
+  Log: /tmp/themis-cli-typed-accept-fmt.log. Resolves the typed-acceptance
+  finding; nine other independent findings remain open. User accepted the
+  fix; capa-cli/src/{backend,rust_backend}.rs staged, including the reviewed
+  backend API additions. Cached whitespace check PASS; prior index preserved.
+  No engine changes or commit. User accepted and staged commands/capability.rs,
+  commands/mod.rs, parser.rs, completer.rs, main.rs and session.rs: raw-handle
+  command dispatch, API flags, help and replay/export behavior. Both doorbell
+  examples and tests/tutorial_tests.rs also accepted and staged. Cached
+  whitespace check PASS. User also accepted and staged capa-cli/src/platform.rs:
+  notification recording, pending-interrupt display and a 128-message
+  per-recipient queue cap. All CLI changes are now staged. User explicitly
+  clarified staging only, no commit. Simulator has no consumption path, so queues
+  remain full after reaching the cap until reset. User informed of this
+  limitation and unsupported Rust-test export for raw capability commands.
+  todo.md also remains unstaged.
+
+- [x] **Monitor policy/exit race fix (DONE):** User approved keeping
+  policy lookup and action under one engine operation lock. Add a scoped
+  VP-exit context with lock-free internal policy/runtime/return helpers;
+  validate the saved domain+VP binding after lock acquisition, skipping an
+  exit whose VP was replaced during revoke polling. Integrate monitor CPUID,
+  MSR and ordinary exit handling without nested mediated operations.
+  Add focused regressions for replacement VPs and lock-held delivery.
+  Preserve the user's staged review stack; fix staged after user review.
+  Implemented with_vp_exit and scoped VpExit helpers; monitor keeps policy
+  handling under the lock. Interrupt routing uses the same protection,
+  retrying physical interrupts against the replacement VP rather than
+  discarding them. Five regressions pass: revoked source, same-domain VP
+  replacement, policy/runtime write/return lock lifetime, interrupt handoff
+  lock lifetime and callback error release.
+  Rechecked tests against the user's mediated-API rule: all child setup,
+  policy changes, switches and revocation use domain_api operations. New
+  test hook only schedules real operations before shared-lock acquisition;
+  no direct child/tree/policy/VP mutation. Existing root boot setup remains.
+  Validation PASS: cargo test (377 tests), address_translation (467 tests),
+  all five cargo loom suites (60 tests), no_std address-translation check,
+  CLI release and BINS_TARGETS=capavisor cargo build-bins. git diff --check
+  PASS. cargo fmt --check still finds pre-existing stack differences starting
+  in src/attest.rs; only new blocks formatted. Logs:
+  /tmp/themis-monitor-lock-{targeted,default,translation,loom,nostd,cli,capavisor,fmt}.log.
+  Full bins.img restored and compared byte-for-byte after packaging; SHA256
+  remains 09e6f00d9e2b289581ce67fd82eb0ac3c2d11adad29fdeab28f93d6b1f21bb17.
+  Temporary image backup removed. No VM boot for this fix.
+  This resolves the stale-policy-after-revoke finding; the other ten findings
+  remain open. User requested a focused diff at completion.
+  Files modified: capa-engine/src/domain_api.rs (scoped exit handling/shared
+  policy helpers); tests/common/mod.rs (one-shot acquisition hook);
+  tests/unit/switch.rs (five mediated regressions);
+  themis/capavisor/src/monitor.rs (locked policy/action dispatch);
+  arch/x86_64/hypercall/switch.rs (locked interrupt routing with retry);
+  todo.md (status). All five source/test files staged at the user's request;
+  prior index preserved, cached whitespace check PASS. No commit created.
+  todo.md remains unstaged.
+
+- **Next capavisor walkthrough:** arch/x86_64/vmexit/{mod,cpuid}.rs.
+  Local EPT violations now log and inject #GP at both user and kernel
+  privilege, removing the old kernel-mode instruction skip. CPUID advertises
+  capability doorbells and extends the maximum Themis leaf to LEAF_PV; its
+  identity subleaf returns current VP index and PV ABI version. Both files
+  accepted and staged at user request; cached diff whitespace check PASS.
+  Current walkthrough: monitor.rs routes exit/CPUID/MSR decisions through
+  mediated engine APIs for effective per-VP policy, uses engine FeatureAction,
+  and surfaces lookup/runtime-MSR errors by logging and halting. Emulated MSR
+  writes update per-VP runtime values rather than attested configuration.
+  Stale-policy-after-revoke finding prompted the completed fix above.
+  monitor.rs accepted and staged with the race fix. Remaining architecture
+  glue in arch/aarch64/mod.rs, arch/x86_64/{mod,x86_platform}.rs and
+  arch_traits/types.rs accepted and staged at the user's request: handoff
+  exports/ARM stub, interrupt destination refresh and pending-vector delivery
+  before guest entry, and notification queue-full mapping to ERR_BUSY.
+  Cached whitespace check PASS. Capavisor walkthrough complete; no commit
+  created. todo.md remains unstaged.
+
+- **Switch-handler review position:** Now walking
+  arch/x86_64/hypercall/switch.rs. First item: hardware Call/Return/Interrupt
+  handoffs run through the engine-owned callback while VP reservations and
+  operation locking remain held, rather than after engine return. Source
+  state is saved before it becomes claimable elsewhere. Handler registers
+  its active Vcpu for the callback. Remaining items: zero-handle yield,
+  effective VP policy masks and removal of guest instruction-byte copying
+  on forwarded MMIO exits. File unstaged; this is not whole-file acceptance.
+  Lock-lifetime clarification: execute's shared operation guard spans the
+  hardware callback and final state publication. Individual capability-domain
+  guards and platform-domain mutexes are short-lived, not held throughout.
+  Running/Locked VP states reserve ownership across the callback; revoke and
+  exclusive policy updates cannot interleave. This is not a domain-wide
+  exclusive lock or exclusion of all concurrent shared engine operations.
+  User accepted the hardware-handoff/locking item after this clarification.
+  User subsequently explicitly requested staging switch.rs; it is staged,
+  cached diff whitespace check PASS. Handoff/locking item accepted; yield,
+  policy masks and instruction-byte removal have not yet been walked through.
+  No commit created.
+
+  Next switch.rs item explained: SWITCH handle zero follows the engine
+  return path with synthetic THEMIS_EXIT_YIELD. The yielding VP gets SUCCESS
+  and advances past VMCALL before saving; its caller resumes with YIELD as
+  the switch exit reason. Synthetic exit metadata is zero rather than stale
+  hardware exit fields; missing return caller yields an ordinary error.
+  User accepted yield handling. File already staged at user request.
+  Policy masks and instruction-byte
+  removal still await walkthrough.
+  Explained remaining switch.rs items: engine supplies effective per-VP
+  exit/interrupt read masks to callbacks instead of capavisor reading domain
+  defaults; permitted registers alone are copied to COMM. Removed guest
+  instruction fetch/copy from MMIO forwarding. Verified CHV themis/vcpu.rs
+  fetches instructions through emulator context for nonconfidential guests
+  and explicitly rejects legacy confidential MMIO, which requires PV services.
+  User accepted the remaining items after confirming that the capavisor
+  instruction-reading block was deleted (page-walking helpers themselves
+  were not removed). switch.rs walkthrough is complete; file already staged.
+
+- [x] **Attestation continuation/locking fix (2026-11-26, DONE):**
+  User approved an engine-mediated callback holding the shared operation
+  lock through signing, cache access and queue publication. Generate a
+  report only for the initial request; continuations must validate sealed,
+  ATTEST permission and revocation without rebuilding the inventory.
+  Implemented Capability::with_self_attestation: caller checks, optional
+  snapshot and delivery all run inside execute(). The handler's platform
+  mutex protects signing, cache access and RX publication within that engine
+  lock. Continuations request no snapshot and do not walk the inventory.
+  Focused tests cover lock lifetime/error release, skipped inventory and
+  unsealed/unauthorized/revoked callers on initial and continuation requests.
+  Validation PASS: targeted attestation/switch/channel tests, cargo test
+  (372 tests), cargo test --features address_translation (462 tests), all
+  five cargo loom suites (60 tests), no_std address-translation check,
+  CLI release build and BINS_TARGETS=capavisor cargo build-bins.
+  git diff --check PASS. Logs: /tmp/themis-attest-lock-*.log.
+  cargo fmt --check still reports existing stack-wide differences, beginning
+  in src/attest.rs; no unrelated formatting sweep.
+  Modified files: capa-engine/src/domain_api.rs (mediated callback),
+  capa-engine/tests/{common/mod.rs,unit/attest.rs} (regressions),
+  themis/capavisor/src/hypercall/attest.rs (locked cached delivery), and this
+  tracker. Full bins.img backed up and compared before packaging, restored
+  afterward and compared byte-for-byte; original image SHA256 remains
+  09e6f00d9e2b289581ce67fd82eb0ac3c2d11adad29fdeab28f93d6b1f21bb17.
+  Temporary backup removed. No live VM boot for this fix.
+  User approved staging: hypercall/attest.rs and its engine/test follow-up
+  (domain_api.rs, tests/common/mod.rs and tests/unit/attest.rs) are staged.
+  Cached diff whitespace check PASS; no commit created.
+
+- [ ] **Joint capavisor source review (2026-11-26, IN PROGRESS):**
+  Started after the user accepted the engine test review. Mapped the current
+  capavisor diff and began with hypercall/mod.rs dispatch and
+  hypercall/doorbell.rs creation decoding. The caller comes from the current
+  core's capability binding; CREATE_DOORBELL delegates validation and
+  mutation to Capability::create_doorbell. Walkthrough now covers NOTIFY
+  dispatch and platform::commit_doorbell: publish RX event first; Sync saves
+  the successful reply/advanced source RIP before engine-owned interrupt
+  handoff, Async posts through inject_via_pid and returns normally. Queue
+  reservation failure returns before publication, reply advancement or
+  interrupt unwind. Now walking through apply_policy_change: engine-provided
+  effective per-VP MSR/exit snapshots populate private MSR/I/O bitmaps.
+  Confirmed snapshots are emitted on ADD_VP, relevant SET/reset and SEAL;
+  removal of the old capavisor seal helper does not remove seal projection.
+  User accepted the policy-projection walkthrough. Current item:
+  snapshot_comm_regs and registers::merge_register_writes preserve pending
+  pre-seal initialization when later runtime writes are forbidden or empty;
+  permitted new writes replace only matching registers. Invalid COMM mapping
+  now returns an explicit error. Next mod.rs item: handoff_vp callback.
+  User accepted the COMM merge/error-handling item. Final mod.rs item now
+  reviewed: handoff_vp delegates the engine-selected Call/Return/Interrupt
+  to the architecture backend using the monitor's registered active VP.
+  Return/interrupt handoff saves/releases hardware before the engine makes
+  the source VP available to another core. User accepted the final item;
+  platform/mod.rs and its new registers.rs helper are staged.
+  Reviewed platform/domain.rs. Diff overview covers removal of legacy
+  address-matched doorbell state/vector setter, cached attestation payload,
+  checked ring capacity/address arithmetic, and prepare/commit RX writes
+  replacing padding/recursive enqueue with checked two-page copying.
+  Clarified first/second split one <=4096-byte message across backing pages;
+  larger attestations use successive <=4080-byte payload chunks from the
+  cached report. User accepted; platform/domain.rs is staged.
+  Current file: hypercall/attest.rs. Reviewed offset-zero cache creation,
+  signed tail/request consumed only at offset zero, cached continuations
+  and one <=4080-byte payload per call (queue-full publishes no chunk).
+  Cache is one per domain; overlapping retrievals must be serialized.
+  User requested removing redundant continuation reports and keeping delivery
+  under engine locking. Implemented the approved mediated callback above;
+  continuations validate the caller without generating another report.
+  Attestation fix validated and explained; user requested the next item.
+  User subsequently approved staging hypercall/attest.rs and its engine/test
+  follow-up; all four files are now staged.
+  User accepted hypercall/capa.rs; the file is staged. Changes unify SEND/ACCEPT/REJECT
+  across capability kinds and REVOKE across tree/domain revocation; policy
+  decoding adds optional VP scope, checked key widths, emulation ranges and
+  explicit INHERIT resets. Cached diff whitespace check PASS; no source edits.
+  User accepted hypercall/mod.rs dispatch; the file is staged. New NOTIFY uses the engine;
+  Sync handoff returns without touching the newly active VP, Async/error
+  paths use normal reply writeback. Unified REVOKE/transfer dispatch removes
+  legacy opcodes. ENUMERATE now returns the smallest pending ID >= start,
+  with an explicit found flag. Cached diff whitespace check PASS; no source edits.
+  Current walkthrough: arch/x86_64/hypercall/{doorbell,mod}.rs. Removes the
+  old GPA-matched, parent-only doorbell enqueue/forwarding path and its
+  architecture hook; engine NOTIFY plus platform::commit_doorbell replace it.
+  write_reply becomes crate-visible for the platform callback's Sync reply.
+  Explicit INJECT_INTERRUPT body is unchanged. User accepted both files;
+  both are staged, cached diff whitespace check PASS.
+  Current walkthrough: arch/x86_64/hypercall/vp.rs. Every VP receives private
+  MSR and I/O bitmaps (seven META pages total), rather than sharing the first
+  VP's bitmaps. I/O starts fully trapped until engine policy projection;
+  removes hardcoded serial-port exceptions and old APIC-access-page argument.
+  User accepted; file is staged. Cached diff whitespace check PASS.
+  Current walkthrough: arch/x86_64/vcpu_ext.rs plus comment-only changes in
+  arch/x86_64/vcpu_switch.rs and platform/vcpu_slot.rs. External interrupt
+  readiness now rejects an already occupied VM-entry event slot, preventing
+  overwrite of a pending event. Comments align handoff reservations with
+  engine state ordering and remove the obsolete dom0-has-no-PID assumption.
+  User accepted all three files; they are staged, cached diff whitespace
+  check PASS. The larger hypercall/switch.rs diff is still to be walked
+  separately. No commit created.
+  Current walkthrough: arch/x86_64/vmcs/mod.rs. Child VMCS setup no longer
+  accepts the unused APIC-access-page address; it passes zero to the shared
+  controls helper and drops the diagnostic field. Child controls already
+  disable xAPIC-access virtualization; this does not remove VAPIC or PID.
+  User accepted after clarification; file is staged, cached diff whitespace
+  check PASS. Related arch_state and boot changes are not yet
+  accepted; review those separately.
+  Current walkthrough: arch/x86_64/boot/{domain,vmcs,launch}.rs. Allocates a
+  private META PID page for each dom0 VP and wires its address into both AP
+  and BSP Vcpu construction instead of zero. These descriptors serve as
+  software pending-interrupt queues; this does not enable hardware posted
+  interrupts. User approved all three files; they are staged.
+  Cached diff whitespace check PASS; no commit created.
+  User agreed to retain software interrupt delivery for this commit and
+  defer hardware posting to a separate evaluation. Removing WSL does not
+  remove nesting when Themis still runs under QEMU/KVM; hardware posting
+  would need migration, stopped-VP, revocation and queue-consumer validation.
+  Current walkthrough: arch/x86_64/{arch_state,apic}.rs. Stores MSR/I/O
+  bitmap addresses per VP, removes the APIC-address mapping exception so
+  engine-approved mappings use the normal path, and centralizes monitor
+  wakeups in send_monitor_ipi. Existing engine cross-core wake stays INIT;
+  the old fixed-vector notification helper becomes INIT-based too, matching
+  software PID delivery. User accepted after clarifying that [u64; 3] stores
+  three bitmap addresses per VP, not three VPs. Both files are staged;
+  cached diff whitespace check PASS. No commit created.
+  Current walkthrough: arch/x86_64/pid.rs. NDST destination-core accesses
+  become atomic release/acquire; remote injection uses the shared INIT
+  wakeup and does not suppress it based on ON, avoiding a missed wake when
+  software drain snapshots PIR then clears ON. Local destination skips the
+  IPI. Documentation now describes software queueing, including dom0 PIDs.
+  User accepted; file is staged. Cached diff whitespace check PASS.
+  The remaining capavisor files are not yet jointly reviewed.
+  User accepted hypercall/doorbell.rs and requested adding it to the commit;
+  that file is staged. Review prompted the attestation production fix above;
+  its new changes are now staged with user approval. No commit created.
+
+- [x] **Joint capability-engine test review (2026-11-26, DONE):**
+  User accepted the test review as complete after the mediated-API audit
+  below. No further test walkthrough is pending. This does not clear the
+  remaining source reviews or eleven open findings. Only todo.md changed
+  for this acceptance note; no staging or commit.
+
+- [x] **Mediated test audit (2026-11-26, DONE):**
+  Reviewed changed engine tests and their fixtures against the domain_api
+  rule. Replaced forged receiver handles with CREATE or transferred channels,
+  direct VP insertion with CARVE + ADD_VP, post-seal policy writes with
+  CREATE policies or pre-seal SET, and direct attestation builders with
+  mediated ATTEST. Pending-transfer tests now use actual SEND freezes and
+  REVOKE operations. Real sender revocation cancels the offer, so a later
+  ACCEPT returns NotFound; the concurrent test also covers ACCEPT winning
+  first, in which case the already-transferred memory survives sender revoke.
+  Common bootstrap grants memory only to the initial root and retains the
+  backing tree. Descendants receive memory through SEND. Ordinary test
+  operations do not mutate capability trees; read-only assertions remain.
+  Two new corruption-based negative handoff cases were replaced with
+  reachable wrong-core and mismatched platform-binding cases, not equivalent
+  coverage of manually corrupted ancestry.
+
+  Scope: changed feature tests and supporting fixtures, not a rewrite of
+  every historical internal test. Older raw primitive/tree tests remain,
+  including legacy cases in unit/{channel,switch}.rs and
+  concurrency/{loom_concurrency,loom_vp_switch}.rs. Do not claim the entire
+  historical suite follows the mediated-API rule.
+
+  Validation PASS: cargo test, cargo test --features address_translation,
+  all five cargo loom suites, no_std address-translation check and CLI
+  release build (two existing dead-code warnings). git diff --check PASS.
+  cargo fmt --check is not clean across the existing stack (starts in
+  src/attest.rs); no unrelated formatting sweep was made. Formatted the
+  rewritten send_pending tests.
+  Logs: /tmp/themis-api-test-audit-{default,translation,loom,nostd,cli,fmt}.log.
+  No production changes for this audit, staging or commit. User index
+  preserved. No VM, mount or background process left running.
+  Joint test review accepted as complete by the user; the rest of the stack
+  and eleven open review findings are not cleared.
+
+  Files modified:
+  - capa-engine/tests/common/mod.rs — root boot grant and mediated memory/VP helpers.
+  - capa-engine/tests/unit/set_get.rs — mediated VP fixtures and nested memory delegation.
+  - capa-engine/tests/unit/switch.rs — pre-seal policies, real child chains,
+    mediated attestation and reachable handoff failure setups.
+  - capa-engine/tests/concurrency/loom_vp_switch.rs — mediated VP provisioning
+    and real SWITCH setup for the return/claim race.
+  - capa-engine/tests/concurrency/loom_concurrency.rs — real receiver authority
+    and sender revocation in changed memory models; exclusive revoke guard.
+  - capa-engine/tests/integration/send_pending.rs — real pending-transfer lifecycle fixtures.
+  - capa-engine/tests/integration/revoke.rs — CREATE receiver children instead of forged handles.
+  - todo.md — audit scope, validation and review handoff.
+
+- **Historical review pause (2026-11-25, superseded by completion above):**
+  User requested stopping here. Continue the joint capability-engine test
+  review, not implementation or boot bring-up. Source walkthrough is done;
+  transfer race tests were explained and accepted. Publication-test review
+  exposed the invalid CLEAN marker and led to the attribute fix below.
+  Next: briefly review the corrected `check_endpoint_publication` in
+  `tests/concurrency/loom_concurrency.rs` and the new
+  `endpoint_send_rejects_memory_attributes_without_mutation` in
+  `tests/unit/channel.rs`, plus the small SEND validation guard.
+  Then guide changed tests in `tests/concurrency/loom_vp_switch.rs`,
+  `tests/unit/{set_get,switch}.rs`, `tests/integration/{revoke,send_pending}.rs`
+  and `tests/common/mod.rs`. Do not describe the entire stack as reviewed.
+  Staging is user-controlled: engine source files are staged, but
+  `src/domain_api.rs` also has an unstaged attribute-validation change;
+  test changes and this handoff remain unstaged. Do not overwrite the index.
+  No commits, VMs, mounts or background checks were started/left running
+  during this review segment. Latest validation and logs are below.
+  Attribute-validation logs:
+  `/tmp/themis-endpoint-attrs-{tests,loom}-1317f85d.log`.
+  Independent reviews are complete, but eleven other findings remain open:
+  stale policy lookup after revoke; wrapped RX-growth rollback; interrupt
+  injection before pending register updates; Linux NMI panic; Linux AML
+  write-width narrowing; CLI typed acceptance; and CHV seccomp, implicit PV
+  resources, MSI-X widths, address reservation and vhost-user backing.
+  These have not been fixed or cleared by the successful boot tests.
+
+- [x] **Endpoint attribute validation (2026-11-25, DONE):**
+  Joint test review identified that memory attributes have no endpoint
+  semantics. Channel/doorbell SEND now rejects non-NONE attributes with
+  InvalidValue before mutation. Removed CLEAN as a synthetic publication-test
+  marker; publication tests check owner references and pending-receiver state.
+  Added rejection tests for every memory flag and a combination, sealed and
+  unsealed receivers, generic SEND and typed channel SEND; rejection leaves
+  ownership, handles and pending state unchanged.
+  Validation PASS: default and address-translation engine tests, all five
+  loom suites, no_std address-translation check and CLI release build
+  (two existing dead-code warnings). No commit. Files:
+  `capa-engine/src/domain_api.rs`, `capa-engine/tests/unit/channel.rs`,
+  `capa-engine/tests/concurrency/loom_concurrency.rs`, `todo.md`.
+
+- **Joint source review (2026-11-25):** `capa-engine/src/` walkthrough
+  completed with the user, including the endpoint transfer fixes below.
+  This does not mark engine test changes or the remaining CLI, monitor,
+  driver, CHV and Linux stack as jointly reviewed. No additional staging
+  or commit was requested.
+
+- [x] **Endpoint transfer race fixes (2026-11-25, DONE):**
+  User-approved review fixes: SEND revalidates operand handle identities
+  under ordered sender/receiver domain write locks before consuming or
+  freezing the endpoint. SEND/ACCEPT/REJECT publish endpoint metadata and
+  table changes under those same locks, with the endpoint lock taken last.
+  NOTIFY snapshots immutable endpoint fields without retaining the endpoint
+  read lock across domain-lock acquisition. Typed channel SEND also checks
+  the endpoint type inside the transaction.
+  Reproduced both bugs before fixing: two concurrent doorbell SENDs both
+  succeeded, and a pending offer exposed stale attributes. Eight new loom
+  regressions cover channel/doorbell double-SEND, mixed receivers, handle
+  reuse and immediate/pending metadata publication with accept/reject.
+  Validation PASS: `cargo test`, `cargo test --features address_translation`,
+  all five `cargo loom` suites, final `loom_concurrency` (38 tests),
+  `cargo check --no-default-features --features address_translation`,
+  and `cd capa-cli && cargo build --release` (two existing dead-code warnings).
+  Files: `capa-engine/src/domain_api.rs` (atomic transfer transactions),
+  `capa-engine/src/doorbell.rs` (NOTIFY lock ordering),
+  `capa-engine/tests/concurrency/loom_concurrency.rs` (race regressions),
+  `todo.md` (handoff). Fixes remain unstaged for joint review; previously
+  staged files are unchanged in the index. No commit.
+
+- [x] **Confidential Linux shared-DMA boot VERIFIED:** kernel #16, matched
+  monitor/driver/CHV and explicit 24 MiB IO policy pass two-CPU confidential
+  Linux boot, authenticated SSH, disk write/sync/read/remove, zero-loss ping
+  and clean shutdown. Guest confirms the fixed 24 MiB SWIOTLB pool.
+  Production NONE masks remain unchanged; live CHV mappings retain private
+  RAM/AP firmware as CARVE and only the declared IO/control/ACPI aliases.
+  CHV virtio memory view excludes private/control/descriptor memory (unit
+  tested for same-backing identity/lifetime, late publication and bounds).
+  No SWIOTLB exhaustion in the successful confidential run.
+  Non-confidential PV and explicit legacy each pass the same two-CPU,
+  authenticated SSH, storage, zero-loss network and clean-shutdown checks.
+  Final validation: ABI 18 tests + 2 doctests, 65 backend tests, real-bus
+  regression, supported VMM check, arch/VMM Clippy --no-deps, Linux DMA patch
+  checkpatch (0 errors/warnings), matched release build and all three live
+  modes PASS. Existing baseline unnecessary-unsafe/build warning remains;
+  whole-file guest PV checkpatch also reports three pre-existing barrier
+  comment warnings, not errors.
+  Owned dom0 has shut down cleanly; no QEMU or image mount remains.
+  Existing nonfatal SVR MSR warning remains open. Next work is optional
+  warning cleanup and remaining isolation/attestation/concurrency evidence,
+  not confidential rootfs/SSH boot bring-up.
+  Latest verified actual disk (supersedes ALL earlier backups below):
+  `/tmp/themis-shared-dma-24m-verified-1317f85d.raw`, SHA256
+  `196093187455c61aafe824f6b42d7be3ae5fb063b411690211137269a4bff5f9`.
+  Packaged disk matches. Kernel #16 SHA256
+  `97892a795a2817240430043f7b8365b332c984b765749363eb9cbc46440f6ff1`;
+  packaged CHV SHA256
+  `5cfe7dbf7e2eeeef6e1f3b12d77fe36596b1ac1e79aba3896f2e849cd2440a60`.
+  Never mount/repack live images. build-bins overwrites dom1.raw from its
+  stale source: back up the CURRENT actual disk before packaging, restore
+  the newest verified disk afterward, and hash-check.
+  Logs: `/tmp/themis-shared-dma-24m-{confidential,pv,legacy}-{live,check,stderr}-1317f85d.log`,
+  package `/tmp/themis-shared-dma-24m-package-1317f85d.log`,
+  kernel `/tmp/themis-shared-dma-24m-kernel-1317f85d.log`.
+  Additional budget files: `themis/crates/themis-abi/src/pv.rs`,
+  `themis/policies/dom1-{pv,confidential}.json` (explicit 24 MiB IO,
+  32 MiB total validation cap); `docs/{chv-themis-config.md,
+  architecture/inter-domain-notification.md}` (transport/DMA contract).
+
+- **Shared DMA bring-up history (DONE; final results above):** kernel build #12 and matched
+  private-mailbox package PASS. Two-CPU PV and explicit legacy each pass
+  authenticated SSH, storage write/sync/read/remove, zero-loss ping and clean
+  shutdown. PV retains x2APIC and uses the new shared IPI/deadline calls.
+  Strict confidential Linux now retains x2APIC and brings both CPUs online
+  with production NONE masks and private AP firmware (live mapping log shows
+  `0xe8000..0xed000 CARVE`, no mirror). It then fails during ACPI initialization
+  at high shared MMIO `0x20fffffee000` (clean address `0xfffffee000`).
+  One-CPU comparison hits the same failure: this is an ACPI hotplug device
+  field, not AP entry. Both PV/confidential log a nonfatal WRMSR `0x80f=0xff`
+  warning while Linux temporarily disables the LAPIC; investigate the APICv
+  software-enable restriction, do not mask it silently.
+  Added targeted guest shared-MMIO hooks for ACPI device OperationRegions,
+  ACPI register I/O, PCI ECAM, virtio config/notification/ISR and PCI MSI-X.
+  No global readl interception. AML RAM, persistent memory, ACPI/NVS and
+  legacy firmware ranges stay local; CHV rejects non-device transactions.
+  Kernel #13 is live-tested: confidential Linux passes ACPI/PCI discovery
+  and reaches virtio, which refuses devices without VIRTIO_F_ACCESS_PLATFORM.
+  Rootfs mount therefore still FAILS; no confidential SSH success claimed.
+  Two-CPU PV and legacy both pass authenticated SSH, storage, network and
+  clean shutdown with the new MMIO hooks.
+  Added strict shared-device MMIO methods in CHV
+  `hypervisor/src/{vm.rs,themis/pv.rs}` and `vmm/src/vm.rs`: missing device
+  bus ranges return errors, while legacy hole behavior remains unchanged.
+  The real-bus regression, all 64 backend tests, arch/VMM Clippy --no-deps
+  and matched release package pass. Strict package live tests also pass:
+  PV completes two-CPU SSH/storage/network/clean shutdown; confidential
+  reaches the same virtio ACCESS_PLATFORM rejection without MMIO errors.
+  Current owned dom0 is cleanly stopped.
+  Kernel #15 built, installed/hash-verified and LIVE-TESTED: confidential
+  Linux detects virtio-blk, reads /dev/vda1 and mounts the ext4 rootfs.
+  Boot then stalls on the declared 1 MiB SWIOTLB pool: 423/512 slots remain
+  occupied, leaving too little room for a 262144-byte disk request.
+  No private fallback occurred. No confidential SSH success claimed.
+  Exact owned child VMM PID 1137 was terminated after preserving logs.
+  Owned dom0 then shut down cleanly for repackaging.
+  User approved a larger arena ("Do 24MiB no? or 12"); selected 24 MiB.
+  PV/confidential JSON now explicitly requests 0x1800000 bytes.
+  ABI and Linux bound each IO arena at 24 MiB and total backing at 32 MiB,
+  including control pages; no automatic growth or private fallback.
+  ABI host-target 18 tests + 2 doctests, 65 backend tests and arch/VMM
+  Clippy --no-deps pass. Kernel/package builds running in
+  `shared-dma-24m-{kernel,package}`.
+  Next: restore current disk and final kernel, hash-check, then retry
+  confidential SSH/storage/network and PV/legacy regressions.
+  Shared DMA implementation IN PROGRESS (user approved): reuse fixed restricted SWIOTLB
+  for both coherent and streaming DMA; register/reserve only the IO arena
+  for page   metadata, keep an explicitly declared budget and no private fallback.
+  Give CHV virtio devices a shared-IO-only memory view using the exact same
+  owned backing as the capability alias (not private/control/descriptor
+  memory). This avoids the existing AccessPlatform translation helpers'
+  unwrap-on-error path. CHV now owns Arc-backed shared mappings and exposes
+  only declared IO ranges to virtio; selected PV advertises ACCESS_PLATFORM.
+  All 65 backend tests and supported VMM check pass, including same-backing
+  identity/lifetime and private/control/descriptor/bounds rejection.
+  Guest changes reserve/register descriptor-discovered IO as E820 RAM,
+  initialize fixed SWIOTLB for coherent and streaming DMA, keep freed DMA
+  pages shared, and skip unused private atomic pools. Kernel build running
+  in `shared-dma-kernel`, `/tmp/themis-shared-dma-kernel-1317f85d.log`.
+  Matched DMA binary package passed; CHV is installed/hash-verified
+  (`b5b4f96f98f37d0487c95cd9166d4b3dd7aac522d2f171ed3a1682001383c73b`).
+  Kernel #15 is now installed and live-proven through confidential rootfs
+  mount; the 1 MiB pool exhaustion above blocks further boot progress.
+  Package log `/tmp/themis-shared-dma-package-1317f85d.log`.
+  Kernel final build `/tmp/themis-shared-dma-kernel-final-1317f85d.log`;
+  live logs `/tmp/themis-shared-dma-confidential-{live,check,stderr}-1317f85d.log`.
+  Additional files: CHV `hypervisor/src/{vm.rs,themis/{pv,vm_state,
+  hypervisor_impl,vm_impl}.rs}`, `vmm/src/{vm,device_manager}.rs`
+  (shared-only owned virtio backing and feature selection);
+  sibling Linux `arch/x86/{Kconfig,include/asm/themis_platform.h,
+  kernel/{cpu/themis_pv.c,setup.c,pci-dma.c}}`,
+  `include/linux/swiotlb.h`, `kernel/dma/{swiotlb,direct,pool}.c`
+  (early arena reservation, fixed allocator and coherent lifetime).
+  Files: sibling Linux `include/linux/{themis_io,virtio_pci_modern}.h`,
+  `arch/x86/{kernel/cpu/themis_pv.c,pci/mmconfig_64.c}`,
+  `drivers/{acpi/{osl.c,acpica/exregion.c},pci/msi/{msi.c,msi.h},
+  virtio/{virtio_pci_common.c,virtio_pci_modern.c}}`
+  (targeted shared-MMIO client and selected-PV adapters).
+  Latest clean actual disk backup:
+  Last clean-shutdown backup:
+  `/tmp/themis-strict-mmio-verified-1317f85d.raw`, SHA256
+  `0edbef9651acbf12708e2a189fc356ac37729496da0a1f997b903c99df9a5e71`.
+  Newer CURRENT disk preserved after the 1 MiB attempt:
+  `/tmp/themis-shared-dma-1m-attempt-1317f85d.raw` (requires possible journal
+  recovery; restore this latest disk after the 24 MiB package).
+  This supersedes older backups; preserve current disk before any future
+  package and restore the newest verified copy afterward.
+  Logs: `/tmp/themis-pv-cpu-private-{boot,linux-live,linux-check,legacy-live,
+  legacy-check,confidential-live,confidential-check,confidential-one-live,
+  confidential-one-check,package}-1317f85d.log`;
+  kernel log `/tmp/themis-pv-device-mmio-kernel-1317f85d.log`;
+  kernel #13 live results `/tmp/themis-pv-device-mmio-{confidential,pv,legacy}-{live,check}-1317f85d.log`;
+  strict package `/tmp/themis-mmio-strict-package-1317f85d.log`;
+  strict live `/tmp/themis-mmio-strict-{pv,confidential}-{live,check}-1317f85d.log`.
+  The latest clean PV disk was backed up before the DMA package and
+  restored afterward with matching hash. Preserve its CURRENT contents
+  before another package. The latest confidential attempt mounted it RW
+  before stalling; its forced VMM termination means journal recovery may
+  be needed. Preserve that CURRENT disk rather than overwriting it.
+
+- **Shared CPU requests and confidential x2APIC (IN PROGRESS):**
+  Strict confidential runs with/without decompressor earlyprintk both stop at
+  LAPIC GPA `0xfee000f0`. Without earlyprintk, native early UART exits disappear.
+  Linux initially enables x2APIC but disables it because Themis never supplied
+  `x86_init.hyper.x2apic_available`. Added that existing callback, gated on
+  selected PV mode and advertised hardware x2APIC virtualization.
+  Selected-PV fixed IPI and TSC-deadline writes now publish explicit shared
+  operands (Platform opcodes 8/9); CHV binds requests to the caller VP and
+  reuses interrupt injection/timerfd. No confidential register masks changed.
+  IPI targets resolve configured APIC IDs, logical clusters and shorthands.
+  Also corrected the old EBDA sharing window: AP firmware/mailbox/tables
+  at `0xe8000..0xed000` must be CARVE, with no parent alias or vTOM mirror.
+  The new regression checks these mappings and neighboring shared ACPI pages.
+  New backend validation/routing/privacy regressions pass: 64 Themis tests, supported
+  VMM check, arch/VMM Clippy `--no-deps`, ABI 18 tests + 2 doctests.
+  Kernel #12 and #13 builds completed; these CPU changes are packaged and
+  live-tested. Both confidential CPUs come online, and PV/legacy full Linux
+  regressions pass. Owned dom0 has shut down cleanly.
+  Next: continue virtio shared DMA after the strict MMIO live check above;
+  do not mistake backend support for shared DMA completion.
+  Files: ABI `themis/crates/themis-abi/src/pv.rs` (CPU opcodes);
+  CHV `hypervisor/src/themis/{pv,vcpu,vm_state}.rs` (validated caller-bound
+  dispatch, topology-aware fixed IPIs, reusable fallible timer/injection,
+  private AP firmware exclusion and regression);
+  sibling Linux `arch/x86/include/asm/{apic,themis_platform}.h`,
+  `arch/x86/kernel/cpu/{themis_platform,themis_pv}.c`,
+  `arch/x86/kernel/apic/apic.c` (availability hook and selected-PV CPU calls).
+  Hardware without x2APIC virtualization still needs a LAPIC MMIO fallback.
+  Current clean disk backed up before packaging:
+  `/tmp/themis-mailbox-pv-legacy-verified-1317f85d.raw`, SHA256
+  `6264d1e08c577fccd6c68be38c904458b03ea7929a6cb572da29e0117fd38f59`.
+  This supersedes older disk backups; restore this one after packaging.
+
+- [x] **Guest-owned AP entry implementation DONE:** user selected the
+  existing Linux TDX-style ACPI MADT mailbox instead of a new capavisor
+  startup operation. CHV now provides a small guest waiting stub, a private
+  mailbox and private identity page tables in existing reserved EBDA memory
+  (`0xe8000..0xecfff`) before sealing. PV secondary VPs have a pre-seal
+  64-bit entry context; Linux's existing `acpi_wakeup_cpu` publishes each
+  APIC ID and trampoline address. CHV only schedules the VPs; no post-seal
+  register permissions or engine interfaces changed. Legacy SIPI unchanged.
+  Version-0 MADT wakeup disables CPU offlining, matching the Linux contract.
+  ACPI table placement checks for overlap with the reserved firmware area.
+  Unit identity-map/mailbox/boundary test, all 61 CHV tests, supported
+  `themis,kvm,ivshmem` VMM check and matched full package pass.
+  Clippy with `--no-deps` passes for the changed arch/VMM crates. Including
+  dependency linting is blocked by 47 existing backend lint errors.
+  First live two-CPU PV run selected `acpi_wakeup_cpu` and entered Linux's
+  AP trampoline, then triple-faulted immediately after its CR3 load at
+  `0x9a14e`. Firmware context omitted EFER.NXE while Linux page tables use
+  NX bits. Corrected pre-seal EFER to LME|LMA|NXE; rebuilt/repackaged,
+  restored the verified disk (`af656459...a802`). Corrected live two-CPU PV
+  Linux now PASSES: MADT selects `acpi_wakeup_cpu`, both CPUs come online,
+  authenticated SSH, disk write/sync/read/remove, ping (zero loss) and clean
+  shutdown. CHV log has no legacy SIPI handler or wait-for-SIPI messages.
+  Explicit legacy two-CPU Linux also passes SSH, disk write/sync/read/remove,
+  zero-loss ping and clean shutdown. Strict confidential comparisons and
+  the current next steps are recorded above.
+  Files: CHV `arch/src/{lib.rs,x86_64/{layout.rs,mod.rs,mp_wakeup.rs}}`
+  (private firmware, identity mapping, initial context and focused test);
+  `hypervisor/src/{vm.rs,themis/vm_impl.rs}` (PV mailbox-mode selection,
+  no legacy wait-for-SIPI for PV); `vmm/src/{acpi,cpu,vm}.rs` (MADT
+  advertisement, placement bound, pre-seal firmware/AP setup);
+  `docs/chv-themis-config.md` (mailbox boot contract); `todo.md`.
+  Logs: `/tmp/themis-guest-ap-mailbox-{package,nxe-package,boot,linux-live,
+  clippy,clippy-nodeps}-1317f85d.log`, corrected live log
+  `/tmp/themis-guest-ap-mailbox-nxe-linux-live-1317f85d.log`.
+  First owned QEMU exited; corrected owned dom0 shut down cleanly after
+  the regressions and confidential comparisons.
+
+- **Confidential dom1 device work RESUMED (IN PROGRESS):** user confirmed
+  standard dom1 boots and explicitly requested continuing the original
+  confidential goal. Latest process check finds no QEMU or child VMM;
+  recheck before any disk operation. Do not manage user-owned VMs.
+  Implement the approved early shared-request PIO bootstrap first, then
+  LAPIC and virtio/shared DMA. Confidential device operations must use
+  shared requests and capability doorbells, never private register decoding.
+  thhv already routes recipient ports to eventfds; CHV dispatches service
+  IDs and reuses device backends/event matching. No device callbacks belong
+  in thhv. Linux forces SWIOTLB for confidential guests, but allocating DMA
+  rings, coherent memory and bounce buffers from declared shared backing
+  is still missing; forcing SWIOTLB alone is not sufficient.
+  Next: validate caller-bound IPI/deadline shared requests, then virtio
+  and shared DMA. Retain NONE register masks. Confidential-safe secondary
+  VP entry now uses the guest-owned mailbox described above; legacy CHV
+  SIPI handling remains only for the legacy transport.
+  VPs already exist before sealing; CHV still schedules them with SWITCH.
+  The issue is their entry state, not creating or scheduling VPs. Do not
+  assume a new engine operation is necessary or bypass the masks.
+
+  [x] Linux CoCo secondary-entry investigation DONE. The local Linux TDX
+  path already uses the user-proposed firmware parking/mailbox pattern:
+  `arch/x86/kernel/acpi/madt_wakeup.c:129-183` writes APIC ID and the 64-bit
+  trampoline address, publishes a wake command and waits for acknowledgment
+  from guest firmware. The callback is installed at line 246; Linux chooses
+  `trampoline_start64` in `arch/x86/kernel/smpboot.c:1000-1006`.
+  This mailbox is firmware/OS communication, not a device request to CHV.
+  SNP instead constructs a protected VMSA containing CS/RIP and initial
+  registers in `arch/x86/coco/sev/core.c:1029-1153`, then requests AP activation.
+  SEV-ES hotplug also resumes guest-side code through an AP halt loop and
+  `soft_restart_cpu` (`core.c:1400-1445`); this is not its initial boot path.
+  The existing MADT mailbox and 64-bit trampoline are now reused with a
+  pre-seal guest-owned waiting stub, private mailbox/backing and valid
+  initial page tables; implementation and live results are recorded above.
+
+  Implemented and validated: Platform PIO 4/5 and MMIO 6/7 use
+  bounded explicit operands and device backends, with shared writes reusing
+  CHV ioeventfd matching. Linux early bootstrap no longer allocates through
+  memblock; scalar/string/delay PIO and IOAPIC use the selected transport.
+  User requested JSON-selectable legacy/PV for non-confidential dom1:
+  `general.device_transport = "legacy" | "pv"` now binds descriptor header
+  flag 1. Standard defaults legacy; confidential defaults PV and rejects
+  explicit legacy. PV needs declared Control+Platform backing. Guest MMIO
+  client hooks and shared DMA are NOT completed by the backend operations.
+  Two-CPU non-confidential Linux passed authenticated SSH, disk
+  write/sync/read/remove, ping and clean shutdown with both explicit legacy
+  and PV policies. PV guest reports `shared PIO=1`; this is not yet a full
+  PV MMIO/DMA boot. Strict confidential Linux initializes CoCo, the shared
+  channel, early console and PV IOAPIC, then stops at LAPIC GPA
+  `0xfee000f0`: legacy private-instruction emulation is correctly refused.
+  CHV exit status 0 on this failure is NOT a successful guest boot.
+  Some native UART exits still occur before the main-kernel PV bootstrap,
+  probably in decompressor early serial code; identify/remove these rather
+  than exposing private registers or trusting cached values.
+
+  Validation: CHV 61 Themis tests pass (including runtime confidentiality
+  overriding a legacy JSON selection before any partition ioctl); ABI
+  18 tests + 2 doctests pass; guest kernel `6.19.14+` build #11 and the final
+  matched `cargo build-bins` pass. The last added change is test-only.
+  Latest verified disk backup:
+  `/tmp/themis-device-transport-verified-1317f85d.raw`, SHA256
+  `af656459623805d5615f5d6080692765c8d3055a7bc0f495bf4112b3fac6a802`.
+  This supersedes the confidential-pio-user-disk backup and was restored
+  into bins.img after packaging with matching hash. Owned dom0 PID 123497
+  shut down cleanly; subsequent process check finds no QEMU/child VMM.
+  Never mount/repack live images; build-bins still overwrites dom1.raw from
+  the stale source image, so preserve/restore the newest disk afterward.
+  Logs: `/tmp/themis-{confidential-pio,device-transport-final}-package-1317f85d.log`,
+  `/tmp/themis-confidential-pio-{smoke,live}-1317f85d.log`,
+  `/tmp/themis-nonconf-{pv,legacy}-linux-{live,check}-1317f85d.log`.
+  Files: CHV `hypervisor/src/themis/{config,pv,vcpu,hypervisor_impl}.rs`
+  (selection, validated dispatch, worker-event reuse, effective runtime
+  confidentiality validation and its no-hardware regression);
+  ABI `src/pv{,/descriptor}.rs`
+  (opcodes, transport flag); Linux `arch/x86/{Kconfig,include/asm/{io,
+  themis_platform}.h,kernel/{setup,io_delay,cpu/themis_pv}.c}` (early client
+  and selected I/O hooks); `themis/policies/dom1-{standard,pv,confidential}.json`,
+  `docs/chv-themis-config.md`, `todo.md` (explicit selection and status).
+
+- [x] **Generic doorbell migration: reviewed, rebuilt and live VERIFIED.**
+  This milestone is for the generic primitive and **standard/non-confidential**
+  Linux integration, not confidential-device completion.
+  Final reviewed stack passes all four-CPU IRQ probes, public Async/eventfd
+  subscription/revoke, generic ownership/reclaim, real child Sync
+  discovery/accept/notify/resume, corrected interruptible HLT regression,
+  signed/unsigned attestation and ten close/unload/reload cycles (640 posts).
+  Signed verification also passes with a live doorbell present (tree and held
+  inventory), not just an empty doorbell array. PV one-VP, two-created-VP/
+  BSP-only and relaunch runs each complete eight requests.
+  Standard Linux `6.19.14+` passes authenticated SSH, two online CPUs,
+  disk write/sync/read/remove, three pings with zero loss and clean shutdown.
+  Reviewed standard-mode CoCo simulation passes five tests; host eventfd
+  counts total five ivshmem notifications (coalescing is valid).
+  Both review findings are fixed: one effective interrupt resolver keeps
+  injection authority at domain scope despite VP snapshots; frozen transfer
+  handles are excluded from held-doorbell attestation. Two new regressions
+  pass in both plain and translated suites (826 test executions total).
+  All five Loom suites pass (52 tests), CLI 16 tutorials/release pass,
+  ABI 17 tests + 2 doctests and CHV 54 tests pass. Full reviewed package build
+  passed; no source changes after that except documentation.
+
+  **Still open:** confidential Linux scalar/string port I/O bootstrap,
+  confidential LAPIC/virtio/shared-DMA services, actual concurrent guest-VP
+  requests and Lean-model parity. Default confidential CoCo fails before
+  guest tests at private-memory emulation (`invalid guest memory range:
+  Bounds`); do not mistake standard-mode CoCo simulation for isolation proof.
+  No production register masks or private-memory protections were weakened.
+  The original HLT stall was a stale test expectation, not a notification
+  regression; driver parks HLT by design and the corrected test verifies it.
+
+  Latest clean tested Linux disk backup:
+  `/tmp/themis-doorbell-reviewed-latest-1317f85d.raw` (3758096384 bytes),
+  SHA256 `f78a107af5aab6128ac8188f48d40a4fad7de967b027806d98b29353820b6a77`.
+  This supersedes `/tmp/themis-doorbell-latest-1317f85d.raw`.
+  Dom0 and all session child VMMs are now cleanly stopped; no temporary
+  bins mount or owned test TAP remains. Latest monitor/driver/VMM/kernel/
+  workloads are packaged and ready for the next `cd themis && cargo themis`.
+  `bins.img` already contains the tested updated disk; future build-bins
+  overwrites it from stale `themis/guest/dom1.raw`, so restore this newest
+  backup after packaging and verify its hash. Never mount/repack live disks.
+  Logs: `/tmp/themis-doorbell-reviewed-{package,boot,live,held-attest,
+  coco-live,coco-stderr}-1317f85d.log`,
+  `/tmp/themis-doorbell-final-linux-{live,check}-1317f85d.log`,
+  `/tmp/themis-doorbell-review-fixes-{engine,loom}-1317f85d.log`.
+  Session helpers in `files/final-linux-regression.py` and
+  `files/attest-held-doorbell.c` document the exact last integration checks.
+  Modified file inventory/reasons are recorded in the migration entries below;
+  final review-fix files: `capa-engine/src/{domain,domain_api,doorbell,attest}.rs`,
+  `tests/unit/switch.rs`; `thhv/test/test_child_hlt.c` (real HLT contract).
+  Next: resume the existing confidential-PIO task using only explicitly
+  shared request buffers and the new capability doorbells; do not restore
+  address-matched monitor notifications or expose private registers/memory.
+
+- **Final doorbell ABI live regression (IN PROGRESS)**:
+  Update: both independent-review fixes pass plain/translated engine,
+  all five Loom suites, and CLI 16 tutorials/release. Standard-mode CoCo
+  workload passes all five tests; CHV records all five ordinary ivshmem MMIO
+  notifications. Confidential mode is still blocked before the guest tests.
+  Logs: `/tmp/themis-doorbell-standard-coco-{live,guest}-1317f85d.log`,
+  `/tmp/themis-doorbell-review-fixes-{engine,loom}-1317f85d.log`.
+  Dom0 stopped cleanly; reviewed package rebuild is running.
+
+  Review found two bugs, now fixed with regression tests: doorbell checks
+  now share the effective interrupt resolver (VP visibility, domain injection
+  authority), and frozen transfer handles are omitted from held-doorbell
+  attestation. Plain/translated engine tests and CLI 16 tutorials/release pass;
+  final Loom rerun is running. Files: `capa-engine/src/{domain,domain_api,
+  doorbell,attest}.rs`, `tests/unit/switch.rs`.
+  The HLT stall was a stale test: thhv deliberately parks HLT rather than
+  returning it to userspace. `thhv/test/test_child_hlt.c` now interrupts the
+  wait with SIGALRM and checks the actual COMM HLT record; live PASS.
+  Linux final ABI reached a two-CPU login prompt. Two test-harness issues
+  prevented completing SSH: nonblocking-terminal diagnostic printing
+  (fixed by stderr file), then TCP-open preceding a real SSH banner (probe
+  now checks the banner). No Linux/device policy weakened.
+  Default confidential CoCo workload exits before guest tests with
+  `invalid guest memory range: Bounds`, consistent with the known confidential
+  emulation blocker; it does not validate ivshmem. Separate standard-mode
+  ivshmem regression is running. Next: package the review fixes together,
+  reboot, rerun live regressions and complete Linux SSH/storage/network/shutdown.
+
+  Rebuilt four-CPU dom0 is responsive. All 16 targeted IRQ probes pass;
+  public Async/eventfd subscription/revoke and generic ownership/reclaim
+  pass on all CPUs. Real child ENUMERATE/ACCEPT/Sync NOTIFY/resume passes.
+  Final-format unsigned and signed reports pass, including Ed25519
+  verification (flags 5, header count at 36, envelope after all arrays).
+  Ten immediate-owner-close/unload/reload cycles pass (640 posted events).
+  PV one-created-VP, two-created-VP/BSP-only and relaunch runs each pass
+  all eight requests with attested doorbell discovery.
+  Separate old `test_child_hlt` stalled in RUN_VP while dom0 stayed
+  responsive; its exact owned PID was terminated. Independent reviewer
+  is checking whether its setup is stale; do not report this test as passed.
+  Final two-CPU Linux SSH/disk/network/shutdown check is running.
+  Logs: `/tmp/themis-doorbell-final-{boot,driver-live,attest-unload,pv-live,
+  linux-live,linux-check}-1317f85d.log`.
+  Live dom0 shell: `doorbell-final-boot`; never mount its disks while running.
+
+- **Linux/device migration VERIFIED; final combined rebuild IN PROGRESS**:
+  Update: full matched `cargo build-bins` passed after removing the remaining
+  old synthetic exit, global vector setter and unused address-table constants.
+  CLI 16 tutorials/release, engine plain/translated/all five Loom suites,
+  shared ABI 17 tests + 2 doctests and CHV 54 tests pass. CPUID bit 1 is
+  reserved (retired interface); new bit 3 advertises capability doorbells.
+  Latest disk restored into bins and SHA256 verified. New four-CPU stack
+  is booting for final live regression. Independent review is running.
+  Additional files: capavisor `platform/domain.rs`,
+  `arch/x86_64/{hypercall/switch,vmexit/cpuid}.rs`; shared ABI `src/pv.rs`;
+  CHV `hypervisor/src/themis/policy_walker.rs` (retired exit/feature cleanup);
+  `CONTEXT.md`, `docs/{domain-comm,capability-engine/semantics,
+  architecture/{attestation,inter-domain-notification,confidential-vm,
+  mshv-themis,interrupt-virtualization}}.md`, `thhv/README.md`,
+  `skills/debugging-dom-boot.md` (current ABI/semantics, historical labels).
+
+  Two-CPU standard Linux booted with the migrated PV client and ordinary
+  MMIO/PIO event matching in CHV, not the capability engine. Authenticated SSH,
+  disk write/sync/read/remove, ping and clean shutdown passed. PV initialization
+  now follows `memblock_set_current_limit`, fixing the early allocation panic.
+  CHV's 54 Themis tests pass, including three event-matching regressions.
+  Removed the old engine notification module, monitor matching handlers,
+  driver IOEVENTFD implementation and obsolete tests. Attestation now has
+  `nr_doorbells` at header offset 36, flag 4 and 40-byte doorbell entries directly
+  after PA maps; no transitional trailing count. Monitor, driver/userspace tests,
+  Linux kernel and CHV build against this final format. CLI validation exposed
+  one leftover display loop over the removed inventory; removed, revalidation
+  pending. Engine translated tests pass; Loom is still running.
+  **Running dom0 still uses the previous transitional ABI**: rebuild/reboot
+  monitor, driver and guests together, never deploy only one new consumer.
+  No child VMM is intentionally running. Latest clean disk backup:
+  `/tmp/themis-doorbell-latest-1317f85d.raw`, SHA256
+  `61a4a3d452e3b674ff76a4f9894e2922dede2bff2f3a379699f6fdcbca81072b`.
+  Next: finish obsolete-code/docs cleanup, pass remaining checks, stop dom0,
+  package (restore this backup after build-bins), boot and repeat live checks.
+  Concurrent guest-VP requests, strict confidential I/O/device services and
+  Lean-model parity remain unverified/unimplemented.
+  Files: Linux sibling `arch/x86/{include/asm/themis_hcall.h,kernel/cpu/themis_pv.c,
+  kernel/setup.c}`, `drivers/virtio/virtio_pci_{common.h,modern.c}` (client/native
+  virtio); CHV `hypervisor/src/themis/{ioevent,vm_impl,vm_state,vcpu,emulator,
+  hypervisor_impl,mod,abi,consts}.rs` (userspace event matching);
+  `capa-engine/src/{lib,domain,platform,attest}.rs`, deleted `notification.rs`,
+  tests `common/mod.rs`, `unit/switch.rs`, `concurrency/loom_vp_switch.rs`
+  (remove bindings/final serialization); `capa-cli/src/rust_backend.rs`
+  (remove old display); `themis/crates/{themis-abi/src/{domcomm,lib}.rs,
+  libthemis/src/lib.rs}`, capavisor `hypercall/{mod,doorbell}.rs`,
+  `arch/x86_64/hypercall/{mod,doorbell}.rs`, `platform/mod.rs`
+  (final ABI/remove handlers); `thhv/{Kbuild,inc/thhv.h}`,
+  `src/{thhv_rx,thhv_domcomm,thhv_part,thhv_vp,thhv_hvcall}.c`,
+  `src/thhv_internal.h`, deleted `src/thhv_ioeventfd.c`,
+  `test/{test_attestation,test_child_hlt}.c` (RX/removal/readers);
+  `eunomia/src/ivshmem.rs` (ordinary MMIO notification); `todo.md`.
+  Logs: `/tmp/themis-doorbell-native-linux-{live,check}-1317f85d.log`,
+  `/tmp/themis-doorbell-{chv,linux,cli,loom}-final-*1317f85d.log`.
+
+- **Capability-based PV round trip VERIFIED; remaining migration IN PROGRESS**:
+  CHV creates one Sync endpoint for each configured shared-memory request queue,
+  subscribes its eventfd and transfers the invocation capability to the child.
+  Descriptor ABI 2 carries recipient/port identity (request protocol stays at 1).
+  Eunomia resolves that identity to its own handle through self-attestation,
+  rather than guessing handles or ringing a fake GPA. Driver RUN_VP now drains
+  RX and returns EAGAIN to userspace after interrupt unwind, so CHV can service
+  the request before resuming the child; the monitor's unwind is unchanged.
+  Live Sync discovery/accept/notify/resume passes. Standard PV launches with
+  one and two created VPs and a subsequent relaunch each complete all eight
+  requests with one passing guest test and no failures. The two-VP workload
+  still runs requests only on the BSP; this is not concurrent guest coverage.
+  Shared ABI tests (17 plus 2 doctests), all 51 Themis VMM tests, guest and
+  CHV release builds and driver build passed before these live runs.
+  Files: `themis/crates/themis-abi/src/{domcomm,pv/descriptor}.rs`
+  (checked attestation lookup and descriptor authority), `eunomia/workloads/pv/src/main.rs`
+  (discovery/notify), CHV `hypervisor/src/themis/{abi,pv,config/pv,vm_state}.rs`
+  (endpoint provisioning and descriptor publication), `thhv/inc/thhv.h`
+  (recipient output), `thhv/src/{thhv_doorbell,thhv_vp}.c` (identity/return boundary),
+  `thhv/test/test_doorbell_sync.c` (EAGAIN-aware regression), `todo.md`.
+  Linux sibling `arch/x86/{include/asm/themis_hcall.h,kernel/cpu/themis_pv.c}`
+  is being migrated to ABI 2/attested handles, with correct SWITCH opcode and
+  no notify-failure/yield fallback; kernel build is running.
+  Logs: `/tmp/themis-doorbell-pv-{live,repeat}-1317f85d.log`,
+  `/tmp/themis-doorbell-linux-build-1317f85d.log`.
+  Next: validate Linux client and strict PV policy; move ordinary device
+  matching to CHV, retire the old engine/monitor mechanism, finish attestation
+  consumers/model parity and package/regress. Strict confidential Linux port
+  I/O remains a separate unsolved blocker. Current dom0 is responsive with
+  copied latest driver/CHV/guest; do not repack/mount its live disks.
+
+- [x] **Retired scheduling-feature cleanup: DONE.** Removed stale multi-core
+  boot requirements and commands from `skills/running-inside-dom0.md` and
+  `themis/README.md`. Removed the retired implementation recipe from
+  `docs/architecture/interrupt-virtualization.md`, corrected the old cleanup
+  inventory and marked old findings below as historical/removed. No code,
+  Cargo feature or script gate remains for the retired scheduler; normal
+  `cargo themis` boots the current four-CPU stack. Archived notes retain
+  history, not active instructions. Files: the four documentation/skill
+  files above and `todo.md`. Validation: repository reference search and
+  inspection of the current capavisor feature list.
+
+- **Driver eventfd/ownership integration VERIFIED; PV migration pending**:
+  All five Loom suites passed after the generic ownership changes, including
+  notify/revoke concurrency. The receive path now has public device ioctls
+  for creating driver-vector endpoints, subscribing an eventfd, notifying and
+  generic revocation; partition SEND_CAP uses the shared SEND VMCALL.
+  Endpoint lifetime belongs to the creating device fd, not the subscription.
+  RX and synchronous reply handling dispatch event type 8 by recipient port.
+  Unload forces monitor entry on every online CPU in process context before
+  releasing IRQs, after endpoint-owner fds have closed/revoked authority.
+  Revoke failure is logged and pins the module instead of freeing a live
+  vector. Public-API tests pass on all four CPUs: notification/eventfd delivery,
+  subscription detach/reattach, attestation interleaving, stale-handle and
+  invalid Sync rejection, generic child transfer and recipient-side reclaim.
+  Ten unload/reload cycles after 640 notifications and immediate owner close
+  passed. The rebuilt monitor also passes the 16 all-CPU IRQ probes.
+  `test_doorbell_sync` passes live: a protected-mode child discovers a pending
+  offer via ENUMERATE, ACCEPTs it, NOTIFYs its blocked parent, resumes after
+  the successful VMCALL, and exits to the parent; exactly one eventfd signal.
+  Separate SEND_CHAN/ACCEPT_CHAN/REVOKE_DOMAIN monitor opcodes/handlers were
+  retired; typed C/Rust compatibility wrappers use shared SEND/ACCEPT/REVOKE.
+  Guest SEND now supplies the no-GPA-hint sentinel explicitly.
+  CHV now validates/emits `policies.api.allow`, including CREATE_DOORBELL and
+  NOTIFY, immediately before seal; unknown names fail. All 51 Themis VMM
+  tests, shared ABI tests, guest-wrapper check and VMM release build pass.
+  Full monitor/driver/workload package rebuild passed before the Sync test
+  was added; that test was compiled separately with -Wall -Wextra -Werror.
+  CHV's latest binary and the Sync test still need final packaging.
+  The current VM uses the rebuilt monitor and packaged driver; bins.img's
+  dom1 disk was restored from the verified backup after packaging.
+  Files: `thhv/src/thhv_doorbell.c` (endpoint/subscription lifetime and dispatch),
+  `src/{thhv_main,thhv_part,thhv_domcomm,thhv_ioeventfd,thhv_doorbell_irq}.c`,
+  `src/thhv_internal.h`, `inc/thhv.h`, `Kbuild` (public ABI, RX and cleanup);
+  `thhv/test/test_doorbell_eventfd.c` (public API regression),
+  `thhv/test/test_doorbell_sync.c` (real child Sync/resume regression);
+  `themis/{capavisor/src/hypercall/{mod,capa}.rs,crates/themis-abi/src/lib.rs,
+  crates/libthemis/src/lib.rs}`, `eunomia/workloads/hypercall/src/main.rs`
+  (shared ownership ABI); CHV `hypervisor/src/themis/{policy_walker,vm_state}.rs`
+  and `docs/chv-themis-config.md` (actual API permission application); `todo.md`.
+  Logs: `/tmp/themis-doorbell-eventfd-1317f85d.log`,
+  `/tmp/themis-doorbell-{chv-tests,chv-build,public-boot}-1317f85d.log`.
+  Next: migrate PV/VMM consumers and ordinary device matching, remove the old
+  monitor matching path, finalize attestation/other consumers, then package
+  and rerun standard dom1. Do not mount/repack disks while the current VM runs.
+
+- **Driver-only common-vector delivery VERIFIED on stock dom0**:
+  No dom0 kernel modification is needed for the tested receive path.
+  thhv uses an IRQ domain layered on the exported x86 vector domain,
+  allocates normal CPU-pinned IRQs until a common vector is held on all
+  online CPUs, and releases unused allocations. No private vector table,
+  IDT writes or hidden symbol lookup. Its software-injection IRQ chip does
+  not EOI a nonexistent physical LAPIC ISR entry. Deferred work drains RX.
+  CPU hotplug is disabled while these fixed registrations are held and
+  re-enabled on driver cleanup.
+  Live stock Ubuntu `6.8.0-136-generic`: vector 38 registered on all four
+  CPUs; four Async notify/revoke rounds per CPU all pass (16 probes).
+  `/proc/interrupts` independently shows four deliveries on each target CPU.
+  Source CPUs may migrate; targeted remote delivery uses the INIT/PIR path.
+  Full capavisor/thhv package build passed with CONFIG_THHV_TEST; latest
+  dom1 disk restored and SHA256 verified after packaging.
+  Translated engine tests, all 16 CLI tutorials and CLI release build pass.
+  All five Loom suites passed. The session VM is currently running for further
+  integration; do not mount/repack its bins or guest disks while it runs.
+  Logs: `/tmp/themis-doorbell-{build,boot,live-irq,driver}-1317f85d.log`.
+  Next: finish capability ownership ABI consolidation and eventfd/PV/VMM
+  migration, then exercise Sync and value/subscription/revoke behavior live.
+  New/modified files this increment: `thhv/src/thhv_doorbell_irq.c`,
+  `src/{thhv_main,thhv_hvcall,thhv_internal}.{c,h}`, `inc/thhv.h`, `Kbuild`
+  (normal per-CPU allocation, deferred IRQ handling and monitor wrappers);
+  `thhv/test/test_doorbell_irq.c` (real all-CPU notification probe);
+  `todo.md` (verified result).
+
+- **Doorbell implementation handoff (IN PROGRESS)**:
+  Engine and CLI stages are implemented; monitor/driver/VMM migration and
+  live validation are not complete. The user approved implementation.
+  Older pause/review notes below are historical, not the current next step.
+  Doorbells are immutable recipient-tree children, transferred like channels;
+  reclaim destroys them. Sync selects the recipient in the live caller chain
+  and shares interrupt unwind; Async stores its target VP. Both require
+  Deliver and injectable. Ownership VMCALLs must be shared, with type dispatch
+  inside the engine.
+
+  Completed: shared handle allocation/ownership dispatch, doorbell lifecycle,
+  policy/attestation inventory, prepared interrupt unwind and failure-atomic
+  notification commit. CLI simulates queues/interrupts and has two passing
+  executable examples. Plain and translated engine suites passed before
+  the last focused additions; all 54 switch tests and all 16 CLI tutorials
+  passed afterward. All five Loom suites passed, including notify/revoke.
+  CLI release built before the final minor CLI edits; rerun at completion.
+
+  Current hardware findings: initial-domain VPs have PID address zero;
+  hardware posted interrupts are intentionally disabled. Existing remote
+  `inject_via_pid` sends a fixed F2 IPI assuming hardware PI, whereas the
+  existing cross-core monitor wake-up uses INIT and works independently of
+  pin controls (`arch/x86_64/arch_state.rs::send_ipi`). INIT handling currently
+  polls cross-core work but does not drain PIR. Reuse this wake-up and existing
+  software drain rather than enabling hardware PI. Sync also needs to finish
+  the source NOTIFY VMCALL before saving it in the shared interrupt handoff.
+  Monitor integration has now started (details below); no live boots yet.
+  Next: finish the interrupt-delivery plumbing, then migrate the shared ABI,
+  driver/VMM/PV consumers and remove the superseded matching mechanism.
+
+  Files changed for the engine/CLI stage:
+  - `capa-engine/src/{doorbell,domain,domain_api,capability,platform,attest,lib}.rs`
+    — endpoint object, common ownership, policy and shared interrupt transaction.
+  - `capa-engine/tests/common/mod.rs`, `tests/unit/switch.rs`,
+    `tests/concurrency/{loom_concurrency,loom_vp_switch}.rs`,
+    `tests/integration/{revoke,send_pending}.rs` — semantic/race regressions
+    and removal of manually colliding fixture handles.
+  - `capa-cli/src/{backend,rust_backend,platform,parser,session,main,completer}.rs`,
+    `src/commands/{mod,capability}.rs` — commands, replay and simulated delivery.
+  - `capa-cli/examples/{doorbells,doorbell-lifecycle}.txt`,
+    `tests/tutorial_tests.rs` — executable semantics examples.
+  - `todo.md` — current progress and integration handoff.
+  Attestation encoding is transitional while the old matching path remains;
+  do not call the end-to-end migration complete.
+
+- **Doorbell monitor/IRQ continuation (IN PROGRESS)**:
+  Initial VPs now have software PID queues allocated from META. The shared
+  INIT wake primitive replaces the remote fixed F2 IPI; NDST uses atomics.
+  Every monitor entry refreshes NDST and drains PIR, preserving any already
+  prepared VM-entry event. Monitor CREATE_DOORBELL/NOTIFY and a separate
+  16-byte port/value DomainComm event are wired. Sync completes its source
+  VMCALL before invoking the shared interrupt handoff; Async posts via PID.
+  Queue and target backing are checked before publication.
+  Engine pending-offer enumeration is type-independent (inclusive start ID;
+  IDs include zero). Generic revoke accepts subhandle zero only for the old
+  direct child-domain destruction semantics; held endpoints still require
+  recipient-tree parent/subhandle revocation.
+  Plain engine tests pass, including the new discovery/revoke regression;
+  capavisor release `cargo check` passes. Full package rebuild, driver
+  wrappers/ioctls, API consolidation/removal of old handlers, translated/
+  Loom reruns and live verification remain pending. New monitor ABI numbers
+  0x24/0x25 and event type 8 are not yet used by runtime consumers.
+
+  Linux receive-path decision is NOT settled. Normal x86 IRQ allocation
+  binds a vector on one CPU (`x86_vector_alloc_irqs` sets single-target;
+  `chip_data_update` populates one CPU's vector table). Sync's fixed vector
+  must work on whichever recipient VP resumes. User challenged the proposal
+  to patch dom0: investigate registration entirely in thhv first.
+  `request_percpu_irq` is exported but expects an already-backed per-CPU
+  IRQ; it does not reserve/map the vector on all CPUs. Pinned Ubuntu
+  6.8.0-136 exports x86_vector_domain/irqd_cfg, but not vector_irq,
+  lock_vector_lock, alloc_intr_gate or x86_platform_ipi_callback.
+  No dom0 kernel patch, per-VP-vector change or Sync restriction is approved.
+  No Linux source changed. Next: resolve this specific driver-only vector
+  registration question before choosing any new kernel integration.
+
+  Additional files modified:
+  - `capa-engine/src/domain_api.rs`, `tests/unit/switch.rs` — generic
+    discovery and direct-domain revoke dispatch/regression.
+  - `themis/capavisor/src/arch/x86_64/boot/{domain,vmcs,launch}.rs`,
+    `platform/vcpu_slot.rs` — initial-VP software PID backing.
+  - `themis/capavisor/src/arch/x86_64/{apic,arch_state,pid,x86_platform,vcpu_ext}.rs`
+    — shared wake-up, concurrent destination reads and pending delivery.
+  - `themis/capavisor/src/{platform/mod,hypercall/mod,hypercall/doorbell}.rs`,
+    `arch/x86_64/hypercall/mod.rs` — validated queue/interrupt transaction,
+    source completion and new monitor dispatch.
+  - `themis/crates/themis-abi/src/{lib,domcomm}.rs` — new opcodes/event payload.
+
+- [ ] **Generic doorbells (IMPLEMENTATION IN PROGRESS)**: User approved the
+  reviewed plan and its corrections. Start with shared engine ownership
+  operations and doorbells, then CLI examples before monitor integration.
+  Existing separate memory/domain handle allocators permit collisions;
+  shared operations require unambiguous allocation and engine-side lookup.
+  Reuse interrupt-unwind preparation/commit for Sync transaction atomicity.
+  Historical design discussion follows; approval supersedes its pause notes.
+  User clarified that
+  doorbells must be immutable channel-like children of the recipient's domain
+  capability, transferable and reclaimable. No reconfiguration API. Both
+  Sync and Async must notify a defined VP/vector, with effective Deliver
+  policy; Sync additionally returns the donated CPU. User requested the full
+  API/MonitorAPI design before implementation. User rejected further
+  unsolicited features and complexity, not continued planning. The
+  overextended draft was withdrawn and removed. User explicitly requested
+  that detailed planning resume, covering APIs, objects and tree effects.
+  Implementation remains paused for review. No proposed API names,
+  permission bits or scheduling details are approved yet. Base the discussion
+  strictly on the user's requirements and existing channel mechanisms:
+  immutable doorbell, create for self/unsealed child, transfer, reclaim,
+  destroy, notify ID/value, recipient interrupt VP/vector, Sync/Async,
+  capability-tree placement, interrupt/MonitorAPI checks and attestation.
+  Findings: CHV's `policies.api.allow` is parsed but not applied;
+  monitor ENUMERATE is stubbed; initial-domain VP slots may lack PID backing;
+  thhv has no actual notification IRQ receive path. Include these integration
+  gaps, not just new type definitions. Abandoned partial engine/CLI rewrite
+  was manually undone without touching prior uncommitted changes. Restored
+  baseline engine compiles and all four notification tests pass with
+  `cargo test --manifest-path capa-engine/Cargo.toml notification`.
+  No new runtime implementation, disk packaging or live boot in this planning
+  increment. Next: deliver the minimal channel-based API plan for user
+  validation; no implementation until approval. The proposal uses the same
+  recipient-tree/holder distinction and move/pending mechanics as channels,
+  immutable vector and kind (`Sync` or `Async { vp_id }`), revocation and
+  ID/value notification. Sync has no stored VP; its target is a blocked
+  caller VP in the active call chain, not a separately configured VP.
+  Reclaim means revocation: destroy the doorbell, never transfer ownership
+  back. There is no separate ownership-return operation. Clearly label
+  proposed MonitorAPI gates. Use one creation API with an optional child
+  capability handle (absent means self). Only creation and notify need
+  doorbell-specific VMCALL operations; send/accept/reject/revoke must use
+  shared capability ownership entry points, not new doorbell-specific ones.
+  Current ABI does have SEND_CHAN/ACCEPT_CHAN and separate memory/domain
+  revoke operations; generalize the shared paths rather than copy that split.
+  User clarified the layer boundary: the monitor exposes one shared entry
+  point per ownership operation. The capability layer resolves handles,
+  checks capability types and dispatches to specialized semantics. Do not
+  require the caller or monitor to select a capability type.
+  User additionally requires adapting `capa-cli` and adding examples after
+  the engine implementation. Use the CLI to exercise/inspect the semantics
+  before full monitor boot: tree placement, transfer, pending acceptance,
+  reclaim, destruction, permission/policy denials and Sync/Async effects.
+  The simulated platform must expose real queued events and pending interrupt/
+  VP-state effects, not print success without modeling delivery. CLI examples
+  and regression tests are an explicit stage before monitor integration.
+  Plan prepared for review in the conversation: proposed API names and
+  MonitorAPI bits, channel-style transfer, recipient-tree revocation,
+  queue/interrupt delivery and CLI-first validation. User confirmed requiring
+  both Deliver and injectable. User confirmed the Sync contract is checked
+  in the engine using the active call chain: e.g. dom1_vp0 -> dom2_vp2
+  identifies blocked dom1_vp0 for a Sync doorbell targeting dom1. A recipient
+  outside that call chain is a semantic error; reject without queue,
+  interrupt or scheduling changes. Validate the selected VP's blocked state
+  and effective vector policy before publication; there is no configured
+  Sync VP to match. For Async, the target VP is stored only in Async(vp).
+  User confirmed Sync must also reach recipients farther up the chain and
+  reuse the existing interrupt-unwind logic/code, not implement a parallel
+  state machine. `deliver_interrupt_vp` already validates Locked edges,
+  changes the target to Running and the leaf/intermediate VPs to Waiting,
+  and preserves resumption links. Share that implementation while allowing
+  explicit doorbell-recipient selection: ordinary interrupt delivery stops
+  at the first Deliver handler, which is not sufficient to select a specific
+  doorbell recipient. Retain all-or-nothing queue/interrupt/unwind validation.
+  Verified channel placement/transfer/revocation code, existing VMCALL
+  dispatch and the documented interrupt-policy distinction. No runtime edits or tests
+  in this planning step. File modified: `todo.md` (correct reclaim semantics
+  and record the review plan). Next: resolve the marked choices with the user.
+  Confidential PIO remains deferred.
+  Files retained this increment: `CONTEXT.md` (small-primitives design rule)
+  and `todo.md` (this handoff). Completed notification records below describe
+  the superseded matching contract, not the requested replacement.
+
+- [x] **Notification documentation: DONE.** Documented `NotificationMatch`,
+  `NotificationBinding`, `NotificationState` and transient `Notification`;
+  source-domain storage, recipient-scoped IDs, lifecycle/permissions and
+  mutable subscriptions; attestation counts, wire offsets and signature
+  coverage. Also documented one-snapshot chunk retrieval and marked older
+  protocol/wrapper sketches as historical. Files: `docs/capability-engine/semantics.md`,
+  `docs/domain-comm.md`, `docs/architecture/attestation.md`,
+  `docs/architecture/inter-domain-notification.md`, `CONTEXT.md` (current
+  doorbell flow), `todo.md` (this completion record). Documentation only;
+  no runtime changes or build required.
+
+- [x] **Notification authority remediation: DONE for the synchronous notification contract.**
+  User approved revising the sequence and continuing: finish capability-owned
+  notification authority/transactions before extending Linux PIO services.
+  User additionally requires doorbells to be part of capa and domain
+  attestation. Store bindings in the domain capability's engine-owned state;
+  configuration requires SET, direct child ownership and an unsealed child.
+  Engine selects recipient and non-reused recipient-global ID; removal is
+  exclusive and may reduce authority after seal. Validate the complete return
+  chain before queue reservation, then perform an infallible handoff/commit.
+  Attestation must serialize this same inventory, not CHV's service metadata.
+  Driver eventfd subscriptions remain mutable and separate from authority.
+  Implemented this model, exact post-seal lookup, exclusive removal and
+  prepared/infallible return through the existing hardware handoff callback.
+  Removed the platform-owned binding table. Queue reservation validates both
+  backing pointers and all capacity before writing, including page/ring
+  crossing; publish once, release producer lock, then commit hardware return.
+  DomainComm is now 1.0 (intentional major incompatibility): power-of-two
+  logical capacity makes u32 cursor rollover preserve offsets. Rust/C and
+  Eunomia consumers agree. Binding entries are part of the engine-derived
+  attestation base and therefore the existing signature, not CHV metadata.
+  Driver RX consumers share one lock; global recipient IDs route messages
+  independently of the VM thread draining. Subscription teardown, duplicate
+  rejection and exact eventfd matching are serialized separately.
+  Independent review caught driver lock/registry errors and a compatibility
+  issue; fixed and follow-up reviews found no significant issues.
+  Validation already passed: full plain/translated engine tests, all five
+  Loom suites (including notification delivery/removal race), ABI 15+2,
+  release CLI, full release stack/package. Live post-seal unsubscribe/
+  resubscribe, duplicate/wrong-eventfd checks and rejection of new post-seal
+  authority pass. One- and two-created-VP PV suites pass, verifying actual
+  child attestation bindings and eight alternating ring/yield requests.
+  Still BSP-only execution: no live concurrent AP claim is made.
+  The new guest attestation check exposed a pre-existing report transport
+  failure: enqueueing every chunk at once exhausted the child's RX ring.
+  Fixed with one engine-derived cached report per domain, one chunk per
+  existing offset call and a driver retrieval loop. Signed continuations
+  retain identical bytes and consume the nonce request only once.
+  Live Ed25519 verification passes, including a 4263-byte multi-chunk report
+  with verified TPM RSA signature while a standard child is running.
+  A 64-byte signed-report buffer returns ENOSPC with the full size, drains
+  all chunks, and is followed by a successful complete signed/TPM report.
+  Additional simultaneous-child probe: one child passes its inventory and
+  requests; the other fails before execution with deferred SET_GUEST_MEMORY
+  EEXIST. Cross-child live coverage is blocked by backing setup, not counted
+  as a notification pass; exact backing ownership remains pending.
+  The old HLT test had stale copied ioctl/layout/META constants; it now
+  includes the real UAPI and provides `--notifications-only` for lifecycle
+  testing. Its default HLT-running mode timed out; that pre-existing behavior
+  is not repaired or counted as a pass. Raw kernel-only VMCALL helpers are
+  now guarded so userspace can include the UAPI.
+  Final standard two-CPU Linux regression passes authenticated SSH, root
+  disk, gateway ping and clean shutdown (launcher exit 0). Parent shutdown
+  also completes cleanly (boot helper exit 0); no session VM or FUSE mount
+  remains. Final packaged CHV, driver, lifecycle test, PV workload and strict
+  confidential profile match their current source/build artifacts.
+  Newest post-validation disk: `/tmp/themis-notify-final-1317f85d.raw`,
+  size 3758096384,
+  SHA256 `976879bdf93a28938363861dec7f47af51123ea90049a1e765571d33958284ba`.
+  The packaged disk is already this version. Restore this backup after
+  future repacks; it supersedes the older cr-final backup below.
+  Next: confidential PIO, keeping production NONE register masks. Cross-child
+  live concurrency must be retried after backing-ownership remediation.
+  Full confidential boot/effective-policy/artifact evidence remains pending.
+  Logs: `/tmp/themis-notify-{engine,loom,cli,build-chunks,acceptance,lifecycle,attest-active-child,short-report,cross-child,boot-final}-1317f85d.log`;
+  standard regression logs use `/tmp/themis-notify-standard-*`.
+  Files modified/created in this notification increment:
+  - `capa-engine/src/notification.rs` (new), `domain.rs`, `lib.rs` —
+    authoritative binding inventory, domain-mediated lifecycle and delivery.
+  - `capa-engine/src/domain_api.rs`, `platform.rs`, `error.rs` — prepared
+    return, queue transaction callback and explicit queue-full error.
+  - `capa-engine/src/attest.rs`, `capa-cli/src/rust_backend.rs` — wire inventory,
+    text display and error conversion.
+  - `capa-engine/tests/common/mod.rs`, `tests/unit/switch.rs`,
+    `tests/concurrency/loom_vp_switch.rs` — permission, match/budget, inventory,
+    queue-full/invalid-return atomicity, cross-child IDs and removal race.
+  - `themis/crates/themis-abi/src/domcomm.rs` — protocol 1.0, notification wire
+    entries and checked, wrapping RX-write planning/tests.
+  - `themis/capavisor/src/platform/{domain,mod}.rs` — remove binding authority,
+    all-or-nothing physical queue writes, report snapshot transport.
+  - `themis/capavisor/src/hypercall/{doorbell,mod,attest}.rs`,
+    `arch/x86_64/hypercall/doorbell.rs`, `arch_traits/types.rs` — thin mediated
+    registration/ring glue, raw input checks, errors and report chunking.
+  - `thhv/inc/thhv.h`, `src/thhv_internal.h`, `src/thhv_ioeventfd.c`,
+    `src/thhv_part.c` — matched ABI, global subscription lifecycle/dispatch.
+  - `thhv/src/{thhv_domcomm,thhv_main,thhv_translate}.c` — serialized RX,
+    interleaved dispatch, bounded report retrieval and bootstrap parsing.
+  - `thhv/test/{test_attestation,test_child_hlt}.c` — verifier offsets,
+    real-UAPI post-seal subscription regressions.
+  - `eunomia/src/domcomm.rs`, `eunomia/workloads/pv/src/main.rs` — matching
+    ring semantics and guest-side attested-binding/round-trip regression.
+  - `docs/architecture/inter-domain-notification.md`, `todo.md` — current
+    implementation, results and remaining acceptance limits.
+
+- **Confidential port-I/O investigation (IN PROGRESS; after notification validation)**:
+  Traced existing Linux PV client and boot order without changing runtime code.
+  `themis_pv_init()` currently runs after `init_mem_mapping()`, but early
+  console setup in `parse_early_param()` runs earlier. Serial and early PCI
+  use standard scalar port-I/O helpers; string I/O and raw I/O-delay assembly
+  are additional paths that must not bypass a confidential/PV transport.
+  Proposed next increment: bounded port/width/value requests in the existing
+  Platform service, existing CHV PIO backends, earlier validated bootstrap,
+  and confidential/PV-only Linux PIO hooks with strict completion checks.
+  Keep native guests unchanged, production register masks NONE, and device
+  payloads outside capavisor.   The user approved the revised sequence; then add
+  focused malformed/width/backend-failure tests, build, independently review
+  and retry strict confidential boot plus standard/PV regressions.
+  PV LAPIC and virtio/shared-DMA remain subsequent work; no new boot success
+  is claimed. No images, processes or runtime source changed in this
+  investigation. File modified: `todo.md` (findings and next step).
+  User requested clarification before approving: exact components, reused
+  mechanisms and capability-policy compliance. Important qualification:
+  Platform service opcodes describe voluntary shared messages to an untrusted
+  virtual-device provider, not new hardware authority; the CHV service list
+  is not itself engine-enforced policy. Existing doorbell identity/authority and enqueue/return atomicity were
+  monitor-owned at investigation time (now remediated above). The proposed PIO extension must not be presented as
+  completing that boundary; include the engine-owned notification work as a
+  prerequisite to claiming full capability-policy compliance.
+
+- [x] **2026-11-25 — Confidential CR_ACCESS local policy: DONE; port-I/O blocker confirmed.**
+  User independently confirmed standard dom1 SSH works; boot seemed slow,
+  performance investigation explicitly deferred. User then shut down both
+  dom1 and dom0 and approved explicit capavisor-local CR_ACCESS handling
+  with NONE parent register masks. Verified images unused and ports free.
+  Preserved the user's latest disk before any packaging:
+  `/tmp/themis-cr-before-1317f85d.raw`, size 3758096384,
+  SHA256 `8075be6a282fb354880eace18d8c6f2613c2e1c32cfa685b78dedef3298bcd46`.
+  This supersedes yesterday's cpuid-final disk for restore after repack.
+  The existing generic monitor queries the running VP's engine exit policy
+  before calling the local CR handler; no monitor override is needed.
+  Added explicit CR_ACCESS local override with NONE read/write masks.
+  Regression proves the actual profile emits exactly that trap/mask stream,
+  retaining default parent-trap and NONE masks: fails before JSON fix,
+  passes after. All CHV Themis tests pass (49); full release stack/package
+  passes. Restored user's newest disk after packaging and verified its hash.
+  Existing local CR handler was read; no hardware/engine code changed.
+  Its incomplete CLTS/LMSW/CR8 cases remain pre-existing limitations, not
+  newly validated support.
+  Live strict retry clears CR_ACCESS and reaches IO_INSTRUCTION (30):
+  serial/PCI accesses cannot be emulated correctly under NONE masks.
+  CHV sees filtered/stale COMM RAX rather than the guest operand, and its
+  staged RAX replies are not authorized to update the guest. The 90-second
+  run times out, then CHV exits cleanly and dom0 remains responsive.
+  Do not treat successful bulk-register staging as proof of application.
+  A disposable diagnostic copied the production profile and explicitly
+  authorized only RAX reads/writes on IO_INSTRUCTION through normal capa
+  policy. It was passed as a separate /tmp profile, never installed over
+  production. This restores real Linux console, detects Themis CoCo/vTOM,
+  establishes the two-VP PV channel and passes I/O APIC discovery. It stops
+  at the expected missing PV LAPIC guard: GPA 0xfee000f0, with no legacy
+  private-memory decoder. Diagnostic CHV shuts down cleanly (launcher 0).
+  This is diagnostic evidence only, NOT full NONE-mask confidential boot.
+  A production fix must not blindly grant whole-RAX access: OUT byte/word
+  operands do not authorize disclosure of unrelated upper RAX bits, nor do
+  IN byte/word replies authorize replacing the whole register.
+  Next: agree a capability-mediated operand-only I/O/PV path (and reject
+  ineffective unauthorized parent emulation explicitly), then PV LAPIC/
+  virtio/shared-DMA work. Notification/backing/evidence remediation remains.
+  Live PV suite passes (1/1). Standard profile was not changed; user verified
+  its SSH immediately before this work. Parent test VM shut down cleanly
+  (boot helper exit 0); no session VM or temporary FUSE mount remains.
+  Production policy SHA256:
+  `fe72fd12b85058a0102e3c52969afd9ea79f51ba2686801b0c5c114e800d9935`.
+  Packaged policy/CHV verified byte-for-byte against source/build.
+  Newest backup `/tmp/themis-cr-final-1317f85d.raw`, size 3758096384,
+  SHA256 `8075be6a282fb354880eace18d8c6f2613c2e1c32cfa685b78dedef3298bcd46`.
+  The packaged disk has the same hash; restore this backup after any repack.
+  Logs: `/tmp/themis-cr-{profile-red,chv,build,boot,pv}-1317f85d.log`,
+  `/tmp/themis-cr-confidential-{launch,stdout,stderr,dom0-dmesg}-1317f85d.log`,
+  `/tmp/themis-cr-io-diagnostic-{launch,stdout,stderr}-1317f85d.log`.
+  Session-only diagnostic harness:
+  `.copilot/session-state/1317f85d-e7cf-4b17-9ef4-c48bd8f124be/files/cr-io-diagnostic.py`
+  under the user's home; remote diagnostic JSON removed.
+  Files modified: `themis/policies/dom1-confidential.json` (local
+  CR_ACCESS with NONE masks), CHV `hypervisor/src/themis/policy_walker.rs`
+  (resolved-profile policy stream regression),
+  `docs/architecture/inter-domain-notification.md`, `todo.md` (handoff/results).
+
+- [x] **2026-11-24 — Generic CPUID emulated ranges: DONE, validated.**
+  User approved exposing existing engine range support rather than widening
+  confidential register masks. `ProcFeatureEmulateRange` now supports CPUID
+  and MSR through normal child-capability/SET/pre-seal checks and domain/VP
+  scope. Exact-range replacement is allowed; overlaps, partial updates,
+  invalid words/endpoints and second-word-before-first are rejected without
+  mutation. Full-width wire endpoints use new range policy kinds 22/23;
+  selector bit 16 selects the result word independently of the VP selector.
+  CHV translates explicit non-indexed CPUID entries to all-ECX ranges and
+  indexed entries to exact answers plus zero gap/tail ranges. Configured
+  points retain precedence without overlapping inherited rules; duplicate,
+  mixed-index and unsupported-flag tables are rejected. The native producer
+  now supplies correct index flags and only one non-indexed entry. Existing
+  indexed coverage 0..3 remains, except sparse XSAVE is collected through
+  architectural component index 63. Runtime fallback uses the same flags
+  and rejects an absent CPUID table instead of silently querying the host.
+  The parsed CPUID default was previously omitted; the walker now emits
+  its explicit configured Native/Trap action as well.
+  Validation: full plain/translated engine tests and release CLI
+  pass; focused engine 65, ABI 14+2 and CHV Themis 48 pass. Independent
+  reviewer found no significant issues and independently passed engine
+  translated set_get 65, ABI 14+2 and CHV 48. Complete Loom and full release
+  bins build/package pass; final CHV repack includes two lint-only fallback
+  fixes and the preserved handoff disk was restored/verified before boot.
+  Engine Clippy passes with existing warnings; CHV Clippy still has 49
+  pre-existing errors (none in the new CPUID/range code).
+  Strict confidential launch now gets past CPUID: both VPs submit 140
+  entries (112 indexed), seal succeeds, and the first forwarded exit is
+  CR_ACCESS (28), not CPUID. CHV correctly fails its register read with
+  EPERM under actual NONE exit masks and shuts down cleanly (launcher 0).
+  This is NOT a successful confidential boot or the PV LAPIC boundary.
+  Local handling of CR_ACCESS already exists in capavisor; the profile
+  currently requests parent trapping by default without allowing the
+  register accesses that CHV's CR handler needs. Do not widen masks as a
+  workaround; the next policy decision is explicit local handling.
+  Live PV suite passes (1/1). Standard two-CPU Linux passes authenticated
+  SSH, CPU-count/root-disk checks, gateway ping and clean shutdown (launcher
+  0). Parent also shuts down cleanly (boot helper exit 0). No production
+  register masks changed. Final packaged CHV and strict policy match
+  source/build byte-for-byte; no test VM or temporary FUSE mount remains.
+  Newest post-validation disk backup: `/tmp/themis-cpuid-final-1317f85d.raw`,
+  size 3758096384,
+  SHA256 `c3fe51e8f550b48fd1ffa0a4ee0669b8eb51710b4b077d9b8d8e8206ed416d01`.
+  This supersedes the older handoff backup below. The packaged image
+  already contains this newest disk; restore it after any future repack.
+  Logs: `/tmp/themis-cpuid-{engine-plain,engine-translated,cli,loom,build,build-final,chv-final,clippy-final,engine-clippy}-1317f85d.log`,
+  `/tmp/themis-cpuid-{boot,pv}-1317f85d.log`,
+  `/tmp/themis-cpuid-confidential-{launch,stdout,stderr,dom0-dmesg}-1317f85d.log`,
+  `/tmp/themis-cpuid-standard-{launch,ssh,stdout,stderr,dom0-dmesg}-1317f85d.log`.
+  Next: engine-owned notification transactions remain unfinished. Before a
+  further strict confidential Linux retry, explicitly resolve CR_ACCESS
+  local-vs-parent policy without granting parent register access; subsequent
+  PV LAPIC/virtio work remains. Full confidential Linux is NOT validated.
+  Files modified this increment:
+  - `capa-engine/src/{domain,domain_api,update}.rs` — mediated exact-range
+    configuration, strict validation and full-width CPUID range delta.
+  - `capa-engine/tests/unit/set_get.rs` — arbitrary ECX, distinct VPs,
+    indexed/zero answers, full-width endpoints, unchanged-on-error and MSRs.
+  - `themis/crates/themis-abi/src/lib.rs` — range selectors and validation.
+  - `themis/capavisor/src/hypercall/capa.rs`, `platform/mod.rs` — thin range
+    decoding and existing live-engine CPUID dispatch projection.
+  - CHV `hypervisor/src/themis/{policy_walker,hypervisor_impl,vcpu}.rs` —
+    range translation, explicit index metadata, configured default and
+    policy-only fallback.
+  - `docs/architecture/inter-domain-notification.md`, `todo.md` — progress
+    and capability-boundary notes.
+
+- **2026-11-24 — Actual confidential exit masks corrected; CPUID blocker exposed.**
+  IMPORTANT correction to the earlier confidential validation: the built-in
+  confidential profile has NONE exit masks, but the explicit dom1 profile
+  replaces the entire `policies` section and omitted `exits`, which therefore
+  deserialized to ALL. Prior live launch logs really show ALL exit masks;
+  NONE interrupt masks did not prove NONE exit masks. Fixed the explicit
+  `themis/policies/dom1-confidential.json` to declare NONE exit read/write
+  masks. Existing inheritance semantics are unchanged.
+  Added a regression to `cloud-hypervisor/hypervisor/src/themis/config.rs`
+  (`dom1_policy_files_parse`) comparing the resolved default exit action with
+  its base profile. It fails before the JSON fix (ALL vs NONE), passes after;
+  full CHV Themis tests pass (45). Independent config review found no
+  significant issues and independently passed all 15 config tests.
+  Live retry confirms the actual resolved ExitAction has NONE masks.
+  It does NOT reach Linux console or the previous PV LAPIC guard: the first
+  forwarded CPUID (reason 10) cannot complete; bounded 90-second run times
+  out, then CHV exits cleanly and the parent remains responsive. Displayed
+  COMM RIP `0x100000` is not a fresh RIP disclosure under NONE masks.
+  Do not widen default masks or claim confidential launch validation passes.
+  Cause now confirmed with a disposable diagnostic profile: both VPs submit
+  85 CPUID entries (2 flagged), but the first forwarded request is leaf 0,
+  ECX `0xc35380`; later examples are leaf 1 with ECX `0x6c65746e` and
+  `0x1a0`. Non-indexed leaves ignore ECX, but `walk_vp_cpuid` installed
+  exact (leaf, subleaf) entries, so these ordinary requests miss the
+  pre-seal answer and fall through to Trap. CHV's old fallback ignored ECX
+  for non-indexed leaves and supplied zero for absent indexed subleaves.
+  The diagnostic profile explicitly allowed only CPUID argument reads
+  (RAX/RCX) and result writes (RAX/RBX/RCX/RDX), under existing capability
+  policy; no monitor/private-memory bypass. Production NONE profile was
+  restored and its SHA256 verified.
+  Next: expose generic emulated-range support through the mediated policy
+  interface so non-indexed CPUID leaf answers cover all ECX values, while
+  preserving indexed leaves/termination and per-VP tables. Honor explicit
+  CPUID index flags and correct their producer rather than infer semantics
+  from equal sample values or silently run host CPUID.
+  Also do not silently accept parent emulation writes that NONE masks
+  intentionally discard. Keep any fix engine-/policy-mediated.
+  Logs: `/tmp/themis-handoff-confidential-{launch,stdout,stderr,dom0-dmesg}-1317f85d.log`;
+  regression proof `/tmp/themis-handoff-profile-red-1317f85d.log`;
+  passing tests `/tmp/themis-handoff-chv-1317f85d.log`.
+  Diagnostic logs:
+  `/tmp/themis-handoff-cpuid-diagnostic-{launch,stdout,stderr}-1317f85d.log`.
+  Files: `themis/policies/dom1-confidential.json` — explicit private exit
+  masks; CHV `hypervisor/src/themis/config.rs` — resolved-profile regression.
+  CHV `hypervisor/src/themis/{vcpu,vm_state}.rs` adds first-exit sanitized
+  CPUID fields and pre-seal table counts for complete diagnostics; reads no
+  new source registers. Trace release build passed, binary deployed and
+  production policy restored. Parent test VM was shut down cleanly.
+  Final release bins rebuild/package and CHV Themis tests (45) pass.
+  Packaged CHV binary and production policy match source/build byte-for-byte.
+  No session QEMU/CHV/swtpm remains. Latest post-validation guest disk:
+  `/tmp/themis-handoff-final-1317f85d.raw`, size 3758096384,
+  SHA256 `e153b12c09e6e3ca299d91d99d4f850fe5f13d4952525a1ff4459a51d88118f4`.
+  This supersedes the older freeze-final backup for subsequent packaging.
+  It has been restored into the final bins image and verified; no temporary
+  FUSE mount remains. Final build/test logs:
+  `/tmp/themis-handoff-build-final-1317f85d.log`,
+  `/tmp/themis-handoff-chv-final-1317f85d.log`.
+
+- **2026-11-24 — Engine-owned VP hardware handoff implemented and reviewed.**
+  `Platform::handoff_vp` is a generic, engine-invoked hardware callback for
+  calls, ordinary/exit returns and interrupt unwinds. The shared operation
+  lock covers validation, hardware completion and scheduling publication.
+  Returns keep the source Running and its destination Locked until the
+  source hardware is saved/released; interrupt unwinds likewise publish no
+  Waiting VP before that callback completes. No Returning state or global
+  exclusive-return lock. Callbacks receive explicit resolved endpoints,
+  exit/vector metadata and engine-selected disclosure masks; platform
+  helpers perform no nested engine operations or authority decisions.
+  Return checks include actual core binding and the complete Locked caller
+  chain. Interrupt delivery validates its owning core, binding and every
+  exact callee link before changing any state; malformed chains no longer
+  partially unwind. Pending core updates drain before validation, with
+  errors propagated. Forward hardware completion also runs inside the
+  operation; collapsed resumes use their actual resolved leaf. Local
+  Deliver interrupts do not swap a VP. The monitor refreshes its current
+  mutable active-VP pointer immediately before entering handoff operations.
+  Validation: full engine suites with/without address_translation, all five
+  Loom suites, CLI release and full release bins build/package pass.
+  Independent implementation review found no significant issues and ran
+  45 switching tests in each engine mode plus six VP Loom tests. Live PV
+  suite passes (1/1). Two-CPU standard Linux passes authenticated SSH,
+  root-disk checks, gateway ping and clean shutdown (launcher exit 0).
+  Actual confidential NONE-exit-mask launch is blocked at CPUID as above;
+  it does not reach the previously observed missing-PV-LAPIC guard.
+  Notification bindings/atomic queue delivery, backing and evidence are
+  NOT fixed by this foundation; next implement the engine-owned notification
+  transaction using this handoff, then driver subscription/RX fixes.
+  Logs: `/tmp/themis-handoff-{engine-plain,engine-translated,loom,cli,build,pv}-1317f85d.log`,
+  `/tmp/themis-handoff-boot-1317f85d.log`,
+  `/tmp/themis-handoff-standard-{launch,ssh,stdout,stderr,dom0-dmesg}-1317f85d.log`.
+  The packaged disk was restored from the latest preserved freeze-final
+  snapshot (SHA256 verified); session-owned `handoff-live` exited cleanly.
+  The newer post-validation handoff disk above was restored after the final
+  package rebuild.
+  Files modified:
+  - `capa-engine/src/{platform,lib}.rs` — typed generic handoff callback/export.
+  - `capa-engine/src/domain_api.rs` — validated save/handoff/commit ordering,
+    current binding/Locked-chain checks and prevalidation core-update drain.
+  - `capa-engine/tests/common/mod.rs`, `tests/unit/switch.rs`,
+    `tests/concurrency/loom_vp_switch.rs` — real-thread paused-save races,
+    invalid-chain/binding/no-swap/resolved-target checks and Loom save window.
+  - `themis/capavisor/src/platform/mod.rs`, `arch/x86_64/{mod.rs,hypercall/switch.rs,vcpu_switch.rs}`
+    — callback projection, explicit endpoint mechanics and pointer boundary.
+  - `themis/capavisor/src/arch/aarch64/mod.rs` — explicit unsupported VP
+    lifecycle callback, matching that backend's existing lifecycle status.
+  - `docs/architecture/inter-domain-notification.md`, `todo.md` — current
+    foundation, validation and remaining transaction boundary.
+
+- **2026-11-24 — Confidential startup-state regression fixed and live-tested.**
+  Full rebuilt stack passes PV requests and standard two-CPU Linux: root disk,
+  SSH, gateway ping and clean shutdown. The first confidential retry instead
+  triple-faults before Linux starts: VP 4, RIP `0x508`, zero GPRs/CR3,
+  CR0 `0x31`. The parent later reports an RCU stall; the outer boot helper
+  has exited. This is a regression, not the expected missing-PV-LAPIC stop.
+  Driver register initialization is staged in parent-writable COMM memory;
+  its first actual snapshot occurs at SWITCH, after seal. The new NONE
+  runtime write mask therefore discards initial register setup.
+  Fixed: the engine captures every VP's initial COMM register values before
+  publishing Sealed under the exclusive operation lock. Private pending
+  snapshots merge only subsequently authorized writes; empty/NONE captures
+  cannot discard initialization, and rejected writes cannot replace it.
+  Failed capture leaves the domain Unsealed; reseal cannot recapture state.
+  No first-entry post-seal ALL exception or broader runtime masks.
+  Full engine address_translation suite, complete Loom suites, CLI release,
+  full release bins build/package and three production merge-helper tests
+  pass. Independent reviewer found no significant issues and independently
+  passed 62 engine access tests plus the three merge tests.
+  Earlier retry with NONE interrupt masks (but, as corrected above, ALL
+  exit masks) starts Linux, negotiates PV and reaches the
+  expected explicit missing-PV-LAPIC stop at `0xfee000f0`; no private decoder
+  or parent fault. Dom0 remains responsive. This is not a full confidential
+  boot. Final PV suite also passes after the freeze fix. Final standard
+  two-CPU Linux reaches clean poweroff. The SSH harness timed out during
+  the session/logout, losing its stdout; recovered guest auth.log confirms
+  its `set -e` validation script reached `sudo poweroff` after CPU-count,
+  root-disk/readability and gateway-ping assertions. Console reaches
+  `reboot: Power down`; CHV exits 0. Do not confuse the harness timeout
+  with an early guest boot failure.
+  Next: engine-owned notification authorization/delivery.
+  Boot log: `/tmp/themis-remediation-boot-1317f85d.log`;
+  confidential launch: `/tmp/themis-remediation-confidential-1317f85d.log`.
+  Standard logs: `/tmp/themis-remediation-standard-{stdout,stderr}-1317f85d.log`.
+  New logs: `/tmp/themis-remediation-freeze-{boot,confidential}-1317f85d.log`,
+  `/tmp/themis-remediation-freeze-confidential-{stdout,stderr}-1317f85d.log`.
+  Parent and standard helpers exited; parent was shut down cleanly.
+  Final standard logs:
+  `/tmp/themis-remediation-freeze-standard-{stdout,stderr,auth}-1317f85d.log`.
+  Newest packaged disk after final clean shutdown is preserved as
+  `/tmp/themis-remediation-freeze-final-1317f85d.raw`,
+  SHA256 `2c9a91a0e41ccd3597018970c14cdbb2a52aef5e5a70b527879980ef5d7a4d1e`.
+  Preserve that newer disk before future packaging, not this earlier snapshot:
+  `/tmp/themis-remediation-poststandard-1317f85d.raw`,
+  SHA256 `f2916028bfced029dd5e32ab0d7069bba3870c57d410610e4f897835f7edf27e`.
+  The earlier `/tmp/themis-remediation-dom1-preserved-1317f85d.raw` is older.
+  Files: engine `src/{domain_api,platform}.rs`, `tests/common/mod.rs`,
+  `tests/unit/set_get.rs`; capavisor `platform/mod.rs` and new
+  `platform/registers.rs` (merge plus directly runnable host regression tests).
+
+- **2026-11-24 — Notification transaction follow-up design review (transaction still pending).**
+  Existing reviewer found a cross-core handoff gap: marking a returning VP
+  Available before its hardware slot is released lets another core claim it.
+  Holding a shared operation lock through hardware completion blocks revoke
+  but not another SWITCH. User corrected the proposed extra state/lock:
+  keep the source Running and its parent Locked until hardware ownership
+  is released, then publish the scheduling transition. Extend Platform with
+  engine-invoked save/handoff callbacks as needed; capa owns validation and
+  ordering, and hardware work must not trail a completed engine operation.
+  No new Returning state is needed merely to compensate for early publication.
+  Drain core updates before
+  preparing/validating return state, not while holding a destination queue lock.
+  A successful enqueue must invoke the prepared infallible commit exactly once;
+  failure invokes it zero times. Complete hardware handoff under the operation
+  lock after releasing the queue producer lock.
+  Also found: current RX enqueue can publish padding then fail on the actual
+  message; replace it with prevalidated cross-page writes and one publication,
+  using u32 wrapping cursor arithmetic. Driver RX consumers need common
+  serialization/dispatch, not just a subscription-table lock.
+  Allocate non-reused binding IDs in the recipient namespace and route all
+  child notifications through a global driver subscription index. Subscription
+  identity includes eventfd/namespace/match data; detach must not remove fixed
+  sealed authority. A separate exact binding lookup permits reattachment
+  without post-seal creation. Deferred CHV ioeventfds are flushed before seal;
+  genuinely new runtime tuples must be predeclared or rejected.
+  RING supplies only key/value: reject ambiguous binding rules rather than
+  arbitrarily choosing by access size or PIO/MMIO namespace. Validate raw
+  arguments before narrowing; canonicalize ignored wildcard fields.
+  Engine-private notify-vector state may represent mutable consumer state,
+  not new sealed cross-domain authority; the shared header is only a mirror.
+  No notification runtime files were changed during this follow-up review.
+
+- **2026-11-24 — Scoped VP policy and first hardware boundaries implemented/reviewed.**
+  User approved section 0.9 and confirmed that VP index is a parameter to the
+  same CPUID policy kind, not separate CPUID_VP0/VP1 kinds. Initial engine work
+  adds category-scoped VP overrides and CPU-local emulated MSR values while
+  keeping initial policy immutable. Every VP retains its own CHV CPUID table,
+  with common discovery policy inherited and JSON overrides taking precedence.
+  The existing SET_POLICY selector now carries optional VP index without
+  reducing capability-handle width. Each VP has independent I/O/MSR bitmaps
+  (7 META pages/VP); removed the COM1-only I/O whitelist. The engine publishes
+  complete effective hardware snapshots at VP creation, policy changes and
+  seal, serialized through projection. Monitor CPUID/MSR/exit/interrupt queries
+  use the actual running VP; failed engine MSR writes are no longer ignored.
+  Added generic default exit/interrupt register masks and default injection
+  permission, strict selector/value/index validation, and separate pre-seal
+  register setup from post-seal access. Confidential profiles now request NONE
+  default masks rather than ALL. Engine address_translation suite, complete
+  Loom suites, CLI release build, capavisor release build, ABI 13+2 tests
+  and CHV 45 Themis tests pass. Full release build/package passed, including
+  driver tests. Reviewer `f388fd06-0c36-4d49-ba8a-e018e45a4857` independently
+  reviewed policy/boundary changes and ran engine set_get (60), walker (14),
+  selector (1), VP MSR Loom (1), and instruction-fetch (3) tests.
+  Standard live Linux and PV tests pass; the setup/runtime-mask regression
+  above is fixed and confidential Linux reaches the expected PV LAPIC guard.
+  Removed private instruction export from capavisor; CHV fetches only through
+  its own guest-memory access and handles instruction page boundaries.
+  Removed LAPIC rights suppression and dummy APIC allocation/pin/carve/send;
+  normal capa EPT/IOMMU projection now applies at that GPA too. Local EPT
+  denial injects #GP(0) at every CPL without skipping the access.
+  User further clarified that sharing is derived from capabilities and their
+  ownership for now: no separate sharing-provenance field/model is required.
+  Scope the report extension to actually missing policy, VP, notification and
+  measurement facts, not redundant sharing authority or metadata.
+  Files: `capa-engine/src/{domain,domain_api,interposition,lib,update}.rs`,
+  engine `tests/unit/set_get.rs`, `tests/concurrency/loom_vp_switch.rs`;
+  ABI `lib.rs`; capavisor `hypercall/capa.rs`, `monitor.rs`,
+  `arch/x86_64/{arch_state.rs,hypercall/{vp,switch}.rs}`, `platform/mod.rs`;
+  `thhv/inc/thhv.h`; CHV `themis/{consts,policy_walker,vcpu,vm_state}.rs` and
+  confidential default JSON; `themis/policies/dom1-confidential.json`;
+  capavisor `arch/x86_64/vmcs/mod.rs`, `vmexit/mod.rs`; ABI `regs.rs`;
+  CHV `themis/{emulator,hypervisor_impl}.rs`; driver
+  `src/{thhv_internal.h,thhv_part.c,thhv_part_mem.c}`;
+  architecture document and this tracker. Remaining work:
+  engine notifications, live denied-access/LAPIC projection
+  probes, backing ownership/lifetime, declared firmware and real post-seal
+  evidence. The larger remediation is not complete.
+
+- **2026-11-24 — Boundary remediation design reviewed and approved.**
+  Proposed fixes are recorded in section 0.9 of
+  `docs/architecture/inter-domain-notification.md`; independent design reviewer
+  `150e4da5-2966-444e-8f1e-85f2d38ecc14` completed the proposal review. No runtime
+  remediation code had been changed at that point. User clarified that shared-memory peers
+  are selected by sending aliases, with all authority governed by existing
+  capa operations and ownership. Removed the proposed separate allowed-peer
+  constraints; do not reintroduce peer lists or another sharing-policy layer.
+  Track actual backing derivation and alias ownership/rights, rather than
+  claiming permanent pair-only access or exclusivity from carving an Alias.
+  Incorporated category-scoped VP overrides, pre-seal policy configuration,
+  VP-local MSR runtime values, and notification validation/producer-lock/
+  infallible-commit ordering. Removal uses the exclusive operation lock;
+  queued entries may drain afterward without binding-ID reuse. Preserve legacy
+  triggers through the same engine path. Proposed local EPT denial is #GP(0)
+  at every CPL, not a forced parent report or skipped instruction. Preserve
+  A4: no new IOMMU mirroring exceptions. Full measurement/report extensions
+  remain the explicit final attestation milestone, not an inferred success.
+  Next: implement and test the approved
+  engine/VP-policy and monitor-boundary changes.
+  Files modified: architecture document (proposed remediation and corrected
+  sharing model); `todo.md` (design status and user clarification).
+
+- **2026-11-24 — Capability/monitor boundary review completed; gaps remain open.**
+  Read-only implementation review requested by user, including whether the
+  monitor makes decisions that should belong to capa. No runtime source was
+  changed during this review; this handoff note is the only repository edit.
+  The capability engine remains unchanged. Seventeen existing focused engine
+  integration tests pass with `address_translation`: alias/carve sends,
+  sender retention/removal, explicit GPA placement, overlap/revoke behavior
+  and the exclusive/shared CVM example. These do not replace live negative
+  descriptor-write/parent-read tests, which remain open.
+  New PV backing is fresh anonymous userspace memory, registered through
+  `THHV_SET_GUEST_MEMORY`. Per physical segment, existing thhv code resolves
+  the parent memory handle, calls ALIAS(RW), then SEND_AT to the child.
+  Confidential vTOM mirrors use another ALIAS/SEND_AT of the same backing.
+  The separate descriptor uses CARVE(R) then SEND_AT. Domain-mediated engine
+  APIs own execute/apply-update; no new direct EPT mapping path was added.
+  mmap's MAP_SHARED flag itself is not capability sharing.
+  Reusable additions are the record/descriptor protocol, notification result
+  handling, reason-tagged CPU return and current-VP discovery. Device semantics
+  stay in CHV/Linux. V1 deliberately supports only parent/RW/sync channels.
+  Confirmed inherited monitor issues, not introduced by the PV diff:
+  - Child I/O bitmaps are initialized to allow every port except COM1 in
+    `themis/capavisor/src/arch/x86_64/hypercall/vp.rs:157-189`.
+    VMCS USE_IO_BITMAPS is enabled in `vmcs/controls.rs:74`, while
+    `platform/mod.rs:554` does not project ExitPolicy changes. Nontrapped
+    ports bypass capa's I/O trap decision. No live port-access probe was run.
+  - Legacy EPT forwarding reads private page tables/code and copies up to
+    16 instruction bytes into the parent intercept message, independently
+    of register read masks (`hypercall/switch.rs:471-495`, x86 directory).
+    CHV's new fail-closed guard is downstream and does not prevent this export.
+  - Doorbell registration resolves a child through
+    `Capability::platform_action_on_child`, but bindings live only in
+    PlatformDomain; the engine does not own their policy/inventory or enforce
+    a seal boundary for registration (`hypercall/doorbell.rs:39-65`).
+    Ring delivery directly looks up caller/parent PlatformDomains and enqueues
+    before the engine return operation (`arch/x86_64/hypercall/doorbell.rs:45-107`).
+    The PV work reused this non-mediated path; fixing reply/queue-full behavior
+    did not make its authorization/revocation boundary compliant with A9.
+  - `arch/x86_64/arch_state.rs:264` silently discards a one-page LAPIC rights
+    update before checking rights, including a requested unmap. Engine and
+    hardware state can diverge; stale-mapping reachability was not live-tested.
+    `arch/x86_64/vmexit/mod.rs:221-241` skips a denied CPL0 EPT access instead
+    of reporting a failure. Both are inherited platform-selected semantics.
+  Positive checks: SWITCH(0)/doorbell CPU returns call the existing engine
+  switch_return_with_exit; the new VP-identity CPUID answer is reached only
+  through the engine-configured Native policy. Synthetic return RAX=SUCCESS
+  is an ABI reply after engine validation, not a parent register-write bypass.
+  Stateful MSR emulation was checked: it already uses the mediated engine API.
+  Separate declaration/evidence gaps: Linux allocation does not prove backing
+  is exclusive to a parent/child pair, and ALIAS does not prohibit further
+  delegation by an authorized holder. Sharing provenance/topology must be
+  established through capa and existing post-seal attestation, not trusted JSON.
+  Existing CHV firmware sharing is also still implicit (`vm_state.rs:93-98`,
+  RWX aliases for 0xA0000..0x100000), and the confidential profile grants ALL
+  registers on ordinary exits. Those operations are capability-authorized but
+  too broad/undeclared for the intended confidentiality claim.
+  Next: resolve the engine-owned notification policy and hardware-policy
+  projection/export gaps before expanding device support. Do not patch around
+  missing mediated APIs or add a new launch-finalization operation.
+
+- **2026-11-24 — Linux PV I/O APIC slice validated; PV LAPIC is next.**
+  Added semantic I/O APIC read/write/EOI/sync dispatch in CHV, serialized
+  across VP threads, with exact register/value bounds and no private-memory
+  reads or instruction decoding. Shared control/I/O regions now also receive
+  RW/NX vTOM aliases for confidential guests; the descriptor remains a separate
+  R-only private mapping. Added native CPUID PV subleaf 1 for the actual
+  current VP index: architectural CPUID APIC IDs are domain-wide policy values
+  and cannot safely select a request slot.
+  Linux sibling worktree now has a built-in early PV client, strict descriptor
+  parsing, permanent per-VP fixmaps, correlated synchronous completion checks,
+  corrected hypercall output operands, and native-default I/O APIC callbacks.
+  Corrected the existing Linux Themis base-signature ECX constant from
+  `0x61436973` ("siCa") to ABI `0x61437369` ("isCa"). This activates existing
+  virtio fast notifications, whose ignored errors were also fixed: at most
+  four ring attempts, yield only between busy failures, and explicit failure
+  propagation without MMIO fallback. Direct virtio transport, shared-only
+  DMA, PV LAPIC and real attestation remain unimplemented.
+  ABI 12 unit + 2 doc tests and strict ABI Clippy pass (use explicit hosted target
+  `--target x86_64-unknown-linux-gnu`; bare-metal default cannot run tests).
+  CHV 41 Themis tests pass, including concurrent platform requests, forbidden
+  service/argument rejection, backend errors and vTOM mapping rights.
+  Independent reviewer `399ee23e-cea9-497f-8691-0d5b0c63ad70` found two
+  integration bugs: the identity subleaf needed an explicit Native policy,
+  and the bus aperture stopped before the EOI register. Both are fixed.
+  Independent follow-up passes 41 Themis tests and the new real-device/bus
+  EOI regression. Independent mocked notification tests pass 7/7 cases.
+  Linux checkpatch reports zero errors/warnings for tracked and new code.
+  Full Linux kernel, release capavisor/CHV, full bins rebuild and packaging
+  pass. Final standard live regression on the final CHV build passes kernel
+  `6.19.14+`, Themis detection (`features=0x7`), two CPUs, `/dev/vda1` ext4,
+  network/password SSH and clean shutdown with CHV exit 0. The configured
+  Eunomia PV policy suite also passes. First standard
+  attempt entered emergency mode after BOOT fsck failure; stopped-image
+  read-only check found no structural errors and unchanged retries passed.
+  Do not silently classify that intermittent userspace failure as resolved.
+  Confidential channel negotiation and I/O APIC initialization are live-tested.
+  An exploratory run reached two CPUs, then crashed CHV while the legacy
+  emulator read private page tables (GVA `0xffffc90000025000`, CR3 `0x2c3c001`,
+  table GPA `0x2c3cc90`). That progress still depended on legacy LAPIC
+  instruction decoding and is NOT final confidential acceptance.
+  Final CHV now rejects confidential EPT/MMIO exits before either LAPIC or
+  generic instruction decoding. The final confidential run detects Themis,
+  negotiates channel 0/two VP slots and initializes the I/O APIC, then fails
+  closed at LAPIC GPA `0xfee000f0`. It reports the missing PV service and
+  tears down the VMM without a private page-table walk or parent kernel #GP.
+  CHV exit 0 here is orderly teardown, NOT successful guest boot.
+  Independent review of this guard and the 41-test regression passes.
+  Next: implement semantic per-VP LAPIC requests and narrow Linux callbacks;
+  then remaining platform/discovery paths and direct virtio/shared-DMA work.
+  Do not weaken the no-decoder guard just to recover the exploratory SMP
+  result. Actual concurrent guest-VP requests, permission-denial tests,
+  private-instruction-export prevention in capavisor and full confidential
+  disk/network/SSH/shutdown acceptance remain open. Attestation remains
+  configure -> seal -> existing attest API; no capability-engine change or
+  new launch-finalization operation was introduced.
+  CHV Clippy retains exactly 50 existing errors and no new PV-module errors.
+  Full-workspace `cargo fmt --all -- --check` is also not clean: widespread
+  formatting drift includes untouched capability-engine files. No unrelated
+  files were reformatted; the new PV module/final guard have no formatter diff.
+  Both final QEMU/TPM processes have exited; no guest owns the image.
+  Persisted packaged kernel SHA-256:
+  `c523d0920975b539bfaad22a329a333135f2f60aa9955419e54c9f74fb5d66d1`.
+  Packaged disk after final clean standard shutdown:
+  `b0af1eb6cad92ebbec2446ffcc1b7c3512471dd7fa81c7fe352744544ac5c35e`.
+  Source `themis/guest/dom1.raw` is untouched. Preserve newer packaged disk
+  writes rather than blindly restoring the older snapshots below.
+  Pre-final-build validated backup:
+  `/tmp/themis-pv-linux-standard-validated-1317f85d.raw`.
+  Final logs: `/tmp/themis-pv-linux-{standard,confidential}-guard-{stdout,stderr}-1317f85d.log`,
+  `/tmp/themis-pv-linux-final-{boot,package}-1317f85d.log`.
+  All changes remain uncommitted; nothing pushed.
+  Files: ABI `src/{lib.rs,pv.rs}` (VP identity and platform opcodes);
+  capavisor `vmexit/cpuid.rs` (current VP); CHV `themis/{pv,vcpu,vm_state}.rs`
+  (dispatch/mappings/fail-closed exit), `devices/src/ioapic.rs` (explicit EOI/bus regression),
+  `arch/src/x86_64/layout.rs` (EOI aperture), confidential JSON profile
+  (explicit control/platform channel), architecture contract (wire details);
+  Linux `arch/x86/kernel/cpu/{Makefile,themis_pv.c}`, `kernel/setup.c`,
+  `kernel/apic/io_apic.c`, `kernel/x86_init.c` and
+  `include/asm/{fixmap,io_apic,themis_hcall,themis_platform,x86_init}.h`,
+  plus `drivers/virtio/virtio_pci_modern.c` (notification error handling).
+
+- **2026-11-24 — Direct PV implementation authorized (IN PROGRESS).**
+  User requested: flesh out contract, subagent design review, implementation
+  and tests, then independent subagent implementation review and testing.
+  Concrete first-milestone contract is section 0.8 of
+  `docs/architecture/inter-domain-notification.md`. Independent design review
+  completed with seven required fixes, now captured in section 0.8.
+  Implemented the atomic shared protocol and descriptor codecs, strict JSON
+  layout resolver, separate R-only descriptor and RW aliases, exact registered
+  doorbells, per-VP CHV servicing, reason-tagged voluntary return, successful
+  child hypercall replies and memory-aware VMCALL assembly.
+  ABI: 12 unit tests + 2 doc tests pass; CHV: 36 Themis tests pass.
+  New `pv` Eunomia workload builds using
+  `cd eunomia/workloads/pv && cargo build --release`.
+  Initial build from the repository root missed Eunomia's Cargo rustflags;
+  no source workaround was needed.
+  [x] First executable channel gate: full release capavisor/thhv/CHV/Eunomia
+  build and packaging pass. Live PV suite passes eight successive alternating
+  doorbell/yield requests, teardown/relaunch, and two-created-VP launch.
+  That workload only runs requests on the BSP: actual concurrent guest-VP
+  requests remain unverified. Hosted two-VP slot dispatch is tested.
+  Existing Eunomia smoke passes 6/6. Standard Linux regression confirms
+  kernel `6.19.14+`, two online CPUs, `/dev/vda1`, network and password SSH,
+  followed by clean shutdown and CHV exit 0. The image does not accept the
+  host SSH key; initial BatchMode failure was authentication, not boot failure.
+  Independent implementation reviewer `1ae2e3ea-1224-4935-942b-5b37fc7301e3`
+  reran ABI/CHV tests and the guest build. Its sole doorbell-budget finding
+  is fixed: shared ABI limit 128, checked combined PV/device registration
+  preflight, threshold/overflow regression. Follow-up review found no remaining
+  first-gate bugs. CHV Clippy still has the same 50 existing errors; new-module
+  errors were fixed. Existing unnecessary-unsafe warning remains.
+  First executable target: JSON-declared capability-backed control/I/O regions,
+  early descriptor discovery and a small-guest request/reply round trip.
+  This uses the final protocol. Linux platform/virtio and applied-state
+  attestation remain required subsequent milestones, not implicit successes.
+  Preserve existing profile/test/debug edits and the newer packaged standard
+  dom1 disk when building. Only manage this session's exact QEMU/TPM processes.
+  Changes this session: `themis-abi/src/{lib.rs,domcomm.rs,pv.rs,pv/descriptor.rs}` (wire
+  contract); `libthemis/src/lib.rs` (memory synchronization/doorbell wrapper);
+  CHV `themis/{config.rs,config/pv.rs,pv.rs,mod.rs,hypervisor_impl.rs,vm_state.rs,
+  vcpu.rs,policy_walker.rs}` (resources, lifecycle, discovery, dispatch and
+  protected synthetic return policies); capavisor `hypercall/{switch,doorbell}.rs`
+  and `vmexit/mod.rs` (yield/doorbell/discovery), `platform/domain.rs` (shared
+  doorbell budget); `thhv/inc/thhv.h` (yield code);
+  `eunomia/workloads/pv/{Cargo.toml,Cargo.lock,build.rs,src/main.rs}` and
+  `eunomia/policies/pv/standard.json` (real guest acceptance);
+  architecture document and `todo.md` (contract/status).
+  Both owned QEMU/TPM processes have exited cleanly; no guest owns an image.
+  Packaged standard disk restored after each build; final verified SHA-256
+  `ebaca581117729107699130687999f7869cdcd0195998966a8c48a5e749c4224`.
+  Source `themis/guest/dom1.raw` remains untouched. No new commits or pushes.
+  Attestation direction clarified by user: seal, then attest the sealed
+  domain through the existing API. No separate launch-finalization operation;
+  no capability-engine code was changed during that rejected design detour.
+  Missing real measurements and applied-state evidence belong in the existing
+  post-seal attestation path; measurement ordering still requires correction.
+  Next: continue Linux early-platform/virtio/shared-DMA work and post-seal
+  attestation. Negative parent/descriptor-access and real concurrent
+  guest-VP acceptance are still open; do not mark whole integration complete.
+  Private-instruction export on legacy EPT forwarding is still unresolved;
+  do not claim confidential Linux or attestation is working.
+
+- **2026-11-24 — Direct, attestable PV interface: planning complete; ABI awaits review.**
+  Historical planning handoff; implementation authorization is recorded above.
+  Latest user direction supersedes the earlier "explicit MMIO now, broader
+  transport later" staging below. Plan the final parent-child shared-memory
+  interface now, including declarative CHV resources and attestable deployment
+  state. This is planning approval, not approval of a concrete runtime ABI.
+  Full proposal: `docs/architecture/inter-domain-notification.md`, section 0.
+
+  Reuse exclusively held parent backing -> ALIAS -> SEND_AT to child before
+  seal; no new memory-sharing primitive. Proposed `comm.regions` and
+  `comm.channels` describe named RW/NX buffers, per-VP control slots, shared
+  I/O arena and parent-service binding. Resolve placement and device inventory
+  before seal. Keep an immutable private bootstrap descriptor separate from
+  mutable shared messages; discover it before PCI/I/O APIC initialization.
+
+  Control protocol: bounded request/reply per VP, explicit operation/sequence/
+  status, checked shared offsets, release/acquire ordering, local snapshots of
+  untrusted messages, no private pointers, instruction decoding or register
+  payload. Current RING_DOORBELL already notifies AND returns to parent;
+  do not follow it with an unconditional second SWITCH(0). Plain SWITCH(0)
+  also needs thhv intercept/result integration and a non-bootstrap register
+  policy. Existing raw VMCALL `nomem` annotation needs attention if reused
+  across a shared-memory publication boundary.
+
+  Proposed guest/device path: built-in Themis early platform backend plus
+  `virtio-themis`, keeping virtio-net/blk and CHV workers. Cover I/O APIC
+  read/write/EOI AND its dummy sync read, LAPIC callbacks, platform discovery,
+  and constrained DMA; sharing only control pages cannot support virtio.
+  No x2APIC mode change, generic readl rewrite or per-net/block-driver edits.
+
+  **Attestation gaps are explicit prerequisites, not already solved.**
+  Existing signed reports omit full policy, content hashes and required
+  sharing/binding evidence. `Platform::measure_region` defaults to zeros and
+  capavisor has no override. HASH-on-send currently measures before the
+  resulting mapping updates are applied; establish stable handoff ordering,
+  not merely a SHA-256 implementation. JSON is expected configuration, not
+  trusted evidence. Keep current unsigned/bootstrap report compatibility.
+
+  Proposed milestones: contract -> declarative launch -> small-guest round
+  trip (one/two VP) -> early Linux platform + virtio block/network -> full
+  confidential acceptance. Measurement/reporting can proceed alongside the
+  channel, but both must pass before claiming attestable deployment.
+  Include stale replies, malformed offsets, lost notifications, concurrency,
+  revocation, denied private access/code export, manifest/evidence mismatch,
+  two-CPU SSH/shutdown and standard-guest regression checks. Batch boot
+  instrumentation. Old register-only/scalar-MMIO implementation tasks are
+  superseded, not implemented.
+
+  Planning added this status and the architecture proposal only; no VM,
+  runtime changes, image repacking, builds, commits or pushes in this step.
+  `git diff --check` passes. Existing uncommitted changes remain:
+  `themis/policies/dom1-confidential.json` (profile fix),
+  CHV `hypervisor/src/themis/config.rs` (profile regression),
+  CHV `hypervisor/src/themis/emulator.rs` (private-walk diagnostic),
+  and prior investigation notes here. Unrelated untracked files preserved.
+
+- **2026-11-24 — Confidential Linux dom1 bring-up (IN PROGRESS).**
+  **Transport staging below is historical; the direct-PV plan above is current.**
+  User approved confidential boot/isolation testing first, then remaining
+  userspace crashes, then x2APIC integration. Keep APIC behavior unchanged.
+
+  **Preflight fix: DONE.** Explicit profile sections replace their base sections:
+  the timer customization lost the confidential CPUID leaf, and named general
+  settings lost `confidential: true`. Restored both in the explicit profile;
+  config merge semantics, timer routing and APIC behavior are unchanged.
+  Extended the existing profile regression; it failed before the fix and all
+  **15 config tests pass** afterward. Release CHV build and
+  `PROFILE=release BINS_TARGETS=chv cargo build-bins` pass.
+
+  **Confirmed first boot blocker: parent MMIO emulation reads private page tables.**
+  Two fresh-stack confidential boots detect `Themis CoCo`, VTOM bit **45**, and
+  reach `ACPI: PM-Timer IO Port: 0x608`, then CHV receives a protection fault.
+  A debug log immediately before the page-table read proves the failing path:
+  `vcpu.rs::handle_mmio_exit` -> `emulator.rs::translate_gva` ->
+  `vm_ops.guest_mem_read`. Latest trace:
+  ```
+  GVA 0xffffffffff5fc000 CR3 0x2c3c000 page-table read GPA 0x2c3cff8
+  [VMEXIT] EPT_VIOLATION CPL=3 gpa=0x10723cff8 ... -> inject #GP(0)
+  ```
+  The parent must NOT read those private page tables. This denial is expected
+  enforcement, not a reason to grant access, and is not a full isolation test.
+  The original stripped ELF's fault is an eight-byte source read at ELF
+  `0x2f68da` (account for executable-segment virtual address `0x145000` when
+  resolving the dmesg mapping, rather than subtracting its start alone).
+
+  **User direction (2026-11-24 13:33 UTC): explicit MMIO now, broader PV interface later.**
+  User accepted the explicit-MMIO direction for now. Later, implement a more
+  MSHV-like paravirtual interface: dom1 publishes requests in memory explicitly
+  shared with dom0, then rings a dom1-to-dom0 doorbell. The shared buffer carries
+  request/reply data; the doorbell is only a notification, not the payload.
+  This should support more than MMIO without exporting private guest memory.
+  It is distinct from DomainComm (domain-to-capavisor) and VpCommPage
+  (parent-to-capavisor register transfer); do not silently repurpose either as
+  guest-to-parent shared memory. Memory sharing and notification authority must
+  remain capability-mediated and work recursively, not special-case dom0.
+  The future transport is deferred, not approved for implementation now.
+
+  **Next step: resolve transport staging before changing code.**
+  The preceding report offered two different guest integration scopes:
+  current platform with bounded Linux hooks, or a Themis-specific transport/
+  platform redesign. User explicitly confirmed `minimal-hooks`, then asked
+  whether doing the larger effort immediately would make more sense.
+  No MMIO implementation changes have started. Separate the transport choice
+  from the guest platform redesign: shared request/reply memory + doorbell can
+  be the initial MMIO transport while retaining bounded Linux hooks.
+  Recommendation under discussion: implement that narrow slice of the eventual
+  transport now, not a throwaway register-only ABI or a full PV device/platform
+  rewrite. It must work before I/O APIC setup, with explicit capability-mediated
+  sharing, synchronous completion, and one independently owned request per VP
+  as an initial design candidate. User correctly pointed out that private
+  parent-child sharing already exists in the capability model. Reuse an
+  exclusively held parent backing region, ALIAS the request-buffer range and
+  SEND_AT that alias to the child before sealing. The parent retains access;
+  starting from exclusive backing avoids inherited ancestor aliases. No new
+  sharing primitive or permission model is required for this setup.
+  Verified `Capability::alias` / `send_at` in `domain_api.rs:238,364`,
+  existing thhv wrappers in `thhv_hvcall.c:34-66`, and the carve -> alias ->
+  send pattern in `tests/integration/translation.rs:184-205`.
+  Remaining bootstrap work is wiring allocation, the child's GPA/discovery
+  and early guest mapping to those existing operations, not designing memory
+  sharing anew. Ordinary parent-child shared buffers are not COMM pages.
+  Keep the full Themis device transport/platform redesign deferred unless the
+  user selects it. Exact ABI, permissions and completion rules still need a
+  concrete implementation plan; the transport revision is not yet approved.
+  Earlier, user selected "Discuss the design first".
+  **Address-only proposal is insufficient and withdrawn as a confidential-MMIO
+  solution.** It removes the parent page-table walk but still requires CHV to
+  decode guest instructions. Current `hypercall/switch.rs:439-466` reads guest
+  instruction bytes and forwards them; CHV `vcpu.rs:1014` decodes them. This is
+  inconsistent with the no-private-code-export direction documented in
+  `docs/architecture/confidential-vm.md` section 12. Do not solve this by passing
+  more address metadata, reading private code for the parent, or loosening
+  capabilities. Next: agree a guest-mediated explicit MMIO request contract
+  (operation, GPA, width, write value; read result returned to guest).
+  An exception-based guest handler still decodes inside the trusted guest;
+  eliminating decoding entirely requires explicit guest MMIO accessor hooks.
+  Explicit MMIO is now accepted in principle; no runtime/ABI change has been
+  implemented yet.
+  Design review follow-up: guest-mediated MMIO is the normal confidential-guest
+  pattern, not necessarily a replacement device protocol. Verified that CHV's
+  existing MSHV backend handles GHCB `SVM_EXITCODE_MMIO_READ/WRITE` directly
+  (`hypervisor/src/mshv/mod.rs:1096-1144`), separately from its ordinary emulator.
+  Hyper-V can also put exception handling/device emulation in a trusted
+  guest-side paravisor; this is not functionality confined to the MSHV host
+  module. A native Themis equivalent needs built-in guest architecture/platform
+  support and a checked monitor/driver/CHV request path, not changes to every
+  device driver. Our Linux `traps.c:1642` #VE entry is currently TDX-specific,
+  so exception delivery/early-boot integration must be designed, not assumed
+  available. Existing Themis doorbell hypercalls cover virtio notifications
+  only. The exception-decoding alternative is not the selected direction.
+  **Follow-up investigation (2026-11-24): DONE; explicit-MMIO direction accepted.**
+  User requested inspiration from Linux MSHV/Hyper-V, ideally keeping Linux
+  changes inside Themis support; CHV changes are acceptable.
+
+  Findings and exact scope:
+  - Existing notify path is real but write-only: Linux
+    `drivers/virtio/virtio_pci_modern.c:710-725` invokes RING_DOORBELL;
+    capavisor `arch/x86_64/hypercall/doorbell.rs:34-107` matches a registered
+    child GPA/value, enqueues DoorbellNotify and returns execution to parent;
+    `thhv_ioeventfd.c:154-199` converts the notification to an eventfd signal;
+    CHV `themis/vcpu.rs:605` ignores the synthetic exit. There is no generic
+    MMIO read, returned data, or request/completion protocol.
+  - Existing fast-path gaps to address before reusing it for general I/O:
+    ring call carries no width and sends `size=0`; enqueue failure is ignored
+    (enqueue returns zero on full ring); Linux notify callbacks discard
+    hypercall status and return true. Reads cannot use this fire-and-forget
+    eventfd path. Some source comments describe an old EPT fast path rather
+    than the actual explicit-hypercall, synchronous-return path.
+  - Inspected upstream Linux MSHV at indexed commit
+    `8d7fe9885c62fc9a95bf55d9db244d9672a8aadc` as the local guest kernel
+    lacks those host-driver files. `drivers/hv/mshv_root_main.c:668-691`
+    forwards unhandled intercept messages to userspace;
+    `mshv_eventfd.c:584-699` separately implements write-notification
+    doorbells/ioeventfd. It does NOT turn arbitrary guest MMIO into
+    explicit operations inside the host driver.
+    Our ordinary x86 CHV MSHV intercept path still uses an instruction
+    emulator (`mshv/mod.rs:707-735`); do not confuse it with the confidential
+    GHCB path or assume the MSHV host driver eliminates decoding.
+  - Actual Linux Hyper-V no-decode precedent is guest-side
+    `drivers/pci/controller/pci-hyperv.c:1097-1159`: MMIO_READ/WRITE requests
+    carry GPA, size and data through a per-CPU hypercall buffer.
+    Its `use_calls` branches replace this driver's own PCI configuration
+    accesses, not every kernel readl/writel. CHV's confidential MSHV path
+    separately dispatches GHCB MMIO_READ/WRITE to its device bus
+    (`hypervisor/src/mshv/mod.rs:1096-1144` in our checkout).
+    Hyper-V paravisor configurations additionally rely on trusted guest-side
+    exception handling/emulation; that is not host-driver-only support.
+  - **First failing guest access is I/O APIC, not virtio.** Read-only GDB
+    against the built Linux vmlinux gives FIX_IO_APIC_BASE_0=515 and
+    its fixed address `0xffffffffff5fc000`, exactly the captured GVA.
+    `arch/x86/kernel/apic/io_apic.c:271-287` writes the index register
+    before reading data. This happens before the normal device-driver path.
+    No running private guest memory was read to establish this.
+  - A host thhv change cannot intercept guest-native MOVs. Guest x86
+    `arch/x86/include/asm/io.h:47-112` emits inline MMIO instructions with
+    no generic runtime callback. Additional bypasses include native LAPIC
+    writes (`asm/apic.h:97-104`) and PCI MMCONFIG accessors
+    (`asm/pci_x86.h:203+`, `arch/x86/pci/mmconfig_64.c:28-84`).
+    Existing I/O APIC hook covers reads only (`x86_init.h:335-338`), not
+    its static write/EOI paths. Thus a single driver or one readl hook
+    cannot transparently cover the current platform.
+  - Checked INDIRECT_IOMEM as prior art: logical I/O callbacks exist, but
+    x86 does not wire `asm-generic/logic_io.h` into its native accessor
+    family. Enabling the option alone is not a driver-only solution.
+    Existing PCI and virtio operation tables can support Themis-owned
+    transports, but a new virtio transport would solve device accesses
+    only, not the early platform MMIO above.
+  - Driver-first alternative is a different virtual platform, not a transparent
+    MMIO interceptor: a Themis virtio transport can implement existing
+    `virtio_config_ops`, keeping virtio-net/blk unchanged. Existing APIC
+    callback/driver installation APIs (`asm/apic.h:275-384`) are useful
+    platform precedents; Hyper-V uses them in `arch/x86/hyperv/hv_apic.c`.
+    Hyper-V's callbacks still fall back to native MMIO for other registers,
+    so copying them as-is does not solve Themis confidentiality.
+    A new Themis APIC backend and no-IOAPIC/platform design could potentially
+    remove the problematic native accesses without generic accessor edits,
+    but IRQ delivery, SMP, timers, discovery and legacy devices must all be
+    specified and tested. ACPI supports skipping I/O APIC probing with
+    `noapic` (`acpi/boot.c:1198-1205`); this alone is not a full boot fix.
+    Do not rule out driver-local support on a redesigned platform, and do
+    not present that larger redesign as already validated or approved.
+
+  Investigation recommendation (accepted in principle; scope/ABI to confirm):
+  - Keep substantive guest logic in built-in Themis platform/driver support,
+    reached through the existing early `themis_platform_init()` call.
+    Accept a bounded set of generic hooks where no usable hook exists:
+    scalar MMIO, native LAPIC paths and PCI configuration need explicit
+    coverage or an agreed platform replacement. No per-net/block-driver edits.
+    Strictly unmodified guest + current platform + no decoding cannot all
+    be provided by the current interfaces. Do not promise otherwise.
+    Alternative for a hard "no existing Linux-file modifications" goal:
+    Themis-owned virtio transport + explicit PV platform, with more CHV/
+    platform work. This is a separate choice, not an implicit APIC/ABI change.
+  - Define a synchronous scalar request/reply path (read/write, GPA, width,
+    write value; completion status/read value), initially 1/2/4/8 bytes.
+    Reuse mediated parent/child switching and COMM transport machinery;
+    parent access limited to deliberate request/reply state. ExitPolicy
+    already indexes u32 synthetic exits and has per-exit register read/write
+    masks (`capa-engine/src/domain.rs:362-385`).
+  - Decide call/range authorization through sanctioned engine interfaces,
+    completion ownership, per-VP in-flight state, ordering, error handling,
+    revocation/cancellation and multi-VP behavior before coding. Existing
+    `platform_action_on_child` is documented as an escape hatch, not an
+    established generic device-permission model.
+  - CHV dispatches typed operations directly to the existing device bus,
+    never its instruction emulator or guest_mem_read/write. Require defined
+    errors for unsupported/unregistered accesses; existing VmOps currently
+    logs missing bus ranges and returns success. Keep doorbells as a
+    narrowly defined notification optimization, not the read/reply mechanism.
+  - Test a tiny sealed scalar-MMIO guest first, then early I/O APIC setup,
+    LAPIC/PCI/MSI-X/virtio configuration, then guest-authorized DMA sharing
+    and full confidential Linux boot. Include denied operations, no private
+    code/register leakage, ordering, overflow, concurrent VPs, revoke during
+    a pending read, and standard-guest behavior.
+  Investigation changed `todo.md` only; no runtime or Linux changes, no VM
+  started and no capability permissions changed. Prior config tests/build
+  results above still describe the unchanged runtime tree.
+  Guest-initiated DMA share-back also appears absent in Linux/CHV; that is a
+  possible later blocker, not the cause of this early fault. Full boot, two-CPU
+  operation, shared I/O, SSH and private-memory isolation remain unverified.
+
+  **Other observed failure, kept separate:** retrying in the first still-running
+  dom0 failed the large `THHV_SET_GUEST_MEMORY` with EINVAL before Linux ran.
+  Another VP then drained no pending regions, sealed, and CHV exited zero.
+  A zero launcher status is therefore not a boot-success test. Cleanup also
+  logs `REVOKE_MEM ... failed (-2)`. Root causes not established or changed.
+  Restarted the stack once to capture the original MMIO fault cleanly.
+
+  **Evidence / validation:** initial logs `/tmp/themis-confidential-{host,stdout,
+  stderr,dom0-dmesg}-20261124.log`; confirmed diagnostic logs
+  `/tmp/themis-confidential-clean-{stdout,stderr,dmesg}-20261124.log` and
+  `/tmp/themis-confidential-diagnostic-host-20261124.log`.
+  Retry evidence is in `/tmp/themis-confidential-diagnostic-stderr-20261124.log`
+  and `/tmp/themis-confidential-retry-full-dmesg-20261124.log`.
+  Tested diagnostic CHV SHA256:
+  `890dd1de01089f1f968e33e8d045a0ecf08564de174af713c3bb083c8effd5a0`.
+  Package Clippy reports 50 findings in existing code; rustfmt reports existing
+  formatting differences outside the added lines. Neither check is globally
+  clean; no unrelated lint/format cleanup performed. Existing unnecessary-unsafe
+  warning in `vm_state.rs:588` remains.
+
+  **Images / runtime handoff:** owned QEMU/dom0 and TPM services shut down cleanly.
+  Latest user-tested standard disk restored to packaged `bins.img` from
+  `/tmp/themis-dom1-standard-before-confidential-1317f85d.raw`, verified SHA256
+  `ebaca581117729107699130687999f7869cdcd0195998966a8c48a5e749c4224`.
+  Host source `themis/guest/dom1.raw` is untouched (SHA256 starts `e39d9c23`).
+  IMPORTANT: build-bins always overwrites the packaged disk from that source,
+  even for CHV-only targets; preserve the newer standard backup when repacking.
+  Current changes uncommitted; no push performed for this work.
+
+  Files modified:
+  - `themis/policies/dom1-confidential.json` — restore confidential discovery.
+  - CHV `hypervisor/src/themis/config.rs` — profile-resolution regression.
+  - CHV `hypervisor/src/themis/emulator.rs` — debug-level read-address diagnostic.
+  - `todo.md` — results, blocker, preserved baseline and next design decision.
+
 - [x] **2026-11-24 — x2APIC/capability-model investigation: DONE;
   implementation requires design confirmation.**
   Saved the verified FAT/networking work as `5763f23`; CHV remains at
@@ -722,9 +3365,8 @@
   of the batching/quantum-boundary real interrupts get — this is what
   livelocked. **Reverted** `msr_emulator.rs` to the original (still-buggy but
   safe) unconditional-inject baseline via `git checkout`. Confirmed
-  `quantum-sched` was NOT enabled during the hang (opt-in feature, off by
-  default — verified via build fingerprints), so the hang is not
-  quantum-sched-specific; it's inherent to reusing the full-swap path at
+  the now-removed interrupt-deferral shim was NOT enabled during the hang
+  (verified via build fingerprints), so the hang was inherent to reusing the full-swap path at
   timer-tick frequency regardless.
 
   **Also fixed in passing**: `update-bins.sh`'s eunomia-policy packaging did
@@ -738,30 +3380,26 @@
   path again, doing a full inventory of capavisor for mechanisms that
   duplicate/bypass the capa-engine's policy model instead of projecting it.
   Findings so far (not yet acted on):
-  1. **`quantum-sched` feature** (`platform/vcpu_slot.rs` `CoreContext::
-     deferred_vector: AtomicU16`, `platform/mod.rs` `set_deferred`/
-     `take_deferred`, `monitor.rs` handlers, `hypercall/switch.rs` child-exit
-     drain) — a second, capa-engine-external interrupt-scheduling axis, opt-in,
-     explicitly documented (`docs/architecture/interrupt-virtualization.md`)
-     as a nested-virt-dev-environment-only shim ("should NOT be enabled on
-     bare metal"). Candidate for full removal.
+  1. **Interrupt-deferral shim: REMOVED.** Its per-core deferred-vector
+     state, helpers, handlers and Cargo feature no longer exist. This
+     historical audit finding is resolved, not a feature to enable.
   2. **`SwitchContext::interrupt_inject` discarded** (`hypercall/switch.rs`
      ~L242: `let _ = switch_ctx.interrupt_inject;`) — a real, tested capa-engine
      field (lazy-unwind re-injection into the true leaf on `SWITCH`-return),
      disabled by a 2026-07-30 stop-gap that says it's safe to re-enable now
      that `policy_walker` wires `InterruptVisibility` correctly. Likely the
      *correct* mechanism to route timer (and other) delivery through instead
-     of quantum-sched's defer hack.
+     of the removed deferral hack.
   3. **Duplicated interrupt-injection mechanisms**: `vcpu_ext.rs`
      `inject_external_vector`, `pid.rs` `inject_via_pid`, and
      `hypercall/switch.rs` `drain_pir_inject_lowest` all implement "deliver a
      vector to a VP" independently; the `guest_can_accept_external() ? direct
      : pid-inject` idiom is copy-pasted in `msr_emulator.rs`,
      `forward_interrupt_to_handler`, and `doorbell.rs`.
-  4. **Overlapping policy axes**: `InterruptVisibility`, `injectable`,
-     quantum-sched's defer flag, and `guest_can_accept_external()` all
-     interact at `forward_interrupt_to_handler`/`doorbell.rs` without one
-     documented unified model.
+  4. **Overlapping policy axes (historical finding)**: `InterruptVisibility`,
+     `injectable` and `guest_can_accept_external()` interacted with the
+     now-removed defer flag. The current model is documented in
+     `docs/architecture/interrupt-virtualization.md`.
   5. **Parallel non-policy-driven MSR trapping**: `msr_virt.rs`'s
      `TRAPPED_RANGES` (perf-counter MSRs) is a hardcoded, global table applied
      identically to every domain via `alloc_msr_bitmap` — entirely separate
@@ -1934,7 +4572,7 @@ PIR drain.  Not blocking any active work stream.
 
 | Document | Path | Content |
 |----------|------|---------|
-| **Interrupt Virtualization** | `docs/architecture/interrupt-virtualization.md` | Single source of truth: goals, HW background, routing model, gap analysis, nested-virt scheduling, quantum-sched, Directvisor reference, 3 delivery bugs |
+| **Interrupt Virtualization** | `docs/architecture/interrupt-virtualization.md` | Single source of truth: goals, HW background, routing model, gap analysis, historical nested-virt scheduling findings, Directvisor reference, 3 delivery bugs |
 | **Attestation** | `docs/architecture/attestation.md` | Two-layer TPM + Ed25519 model |
 | **Address Translation** | `docs/architecture/address-translation.md` | EPT/IOMMU design |
 | **ARM Porting** | `docs/architecture/arm-porting.md` | ARM GICv4 as PI equivalent |

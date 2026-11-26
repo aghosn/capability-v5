@@ -240,8 +240,8 @@ Add new codes here when you use them.  Do **not** reuse existing codes.
 ### How to tell dom0 vs dom1 output apart
 
 1. **Check line ordering**: dom1 output MUST appear **after** the `child VMCS:` line
-   and `[REGISTER_DOORBELL]` lines in `/tmp/out.txt`. If systemd messages appear
-   before these lines, they are **dom0's boot**, not dom1's.
+   in `/tmp/out.txt`. If systemd messages appear before that line, they are
+   **dom0's boot**, not dom1's. The old `[REGISTER_DOORBELL]` path is removed.
 
 2. **Check kernel version**: dom0 is `6.8.0-101-generic #101-Ubuntu`; dom1 uses
    the instrumented kernel `6.8.0-dirty #24` (or similar). Look for `Linux version`

@@ -810,7 +810,15 @@ verify CHANNEL_SEND delivers the alias to dom0.
 
 ---
 
-## 12. Virtio notify via `THEMIS_RING_DOORBELL` (guest patch)
+## 12. Historical virtio address-doorbell patch (removed)
+
+This section records the retired design, not current setup instructions.
+Opcode 0x23 and its CPUID feature bit 1 are reserved and no longer advertised.
+Standard virtio now uses ordinary MMIO, matched in CHV userspace. Explicit
+PV requests use transferred immutable doorbell capabilities and
+NOTIFY(handle, value); CPUID feature bit 3 advertises this interface.
+This does not implement confidential virtio/shared-DMA services.
+See [current doorbell semantics](../capability-engine/semantics.md#doorbell-capabilities).
 
 ### Why
 

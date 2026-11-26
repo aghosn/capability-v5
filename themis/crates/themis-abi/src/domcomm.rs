@@ -4,13 +4,14 @@
 //! the thhv driver (consumer/producer).  They must be `#[repr(C)]` and match
 //! the C definitions in `thhv/inc/thhv.h` exactly.
 //!
-//! See `thhv/docs/domain-comm-v0.2.md` for the full design.
+//! See `docs/domain-comm.md` for the original design. Version 1 uses power-of-two
+//! logical ring capacity and permits RX messages to cross backing pages.
 
 // ── DomainComm constants ─────────────────────────────────────────────────── //
 
 pub const DOMCOMM_MAGIC: u32 = 0x444F_4D43; // "DOMC"
-pub const DOMCOMM_VERSION_MAJOR: u16 = 0;
-pub const DOMCOMM_VERSION_MINOR: u16 = 2;
+pub const DOMCOMM_VERSION_MAJOR: u16 = 1;
+pub const DOMCOMM_VERSION_MINOR: u16 = 0;
 
 /// CPUID leaf for DomainComm discovery.
 /// EAX:EBX = base GPA (lo:hi), ECX = region size in pages, EDX = flags.
@@ -27,7 +28,8 @@ pub mod msg_types {
     pub const DOMAIN_EVENT: u32 = 0x0004;
     pub const ERROR: u32 = 0x0005;
     pub const GROW_ACK: u32 = 0x0006;
-    pub const DOORBELL_NOTIFY: u32 = 0x0007;
+    // 0x0007 retired: address-matching notifications.
+    pub const DOORBELL_EVENT: u32 = 0x0008;
 
     /// Domain → Capavisor (TX ring)
     pub const ATTEST_REQ: u32 = 0x0100;
@@ -52,6 +54,8 @@ pub const DOMCOMM_FLAG_TX_READY: u32 = 1 << 1;
 /// Receivers use this bit to distinguish unsigned vs signed reports without
 /// guessing from total payload size.
 pub const DOMCOMM_ATTEST_F_SEALED: u32 = 1 << 0;
+/// Header offset 36 contains the doorbell count, with entries after the PA map.
+pub const DOMCOMM_ATTEST_F_DOORBELLS: u32 = 1 << 2;
 
 // ── Error codes ──────────────────────────────────────────────────────────── //
 
@@ -102,6 +106,129 @@ pub struct MsgHeader {
 /// Maximum message payload within a single page.
 pub const MAX_PAYLOAD: usize = 4096 - core::mem::size_of::<MsgHeader>();
 
+/// Power-of-two logical capacity makes u32 cursor rollover preserve ring offsets.
+/// Extra backing pages become usable when growth reaches the next power of two.
+pub fn ring_capacity(pages: usize) -> Option<usize> {
+    let bytes = pages.checked_mul(4096)?;
+    if bytes == 0 || bytes > u32::MAX as usize {
+        return None;
+    }
+    Some(1usize << (usize::BITS - 1 - bytes.leading_zeros()))
+}
+
+/// Preserve unread bytes when growth changes the cursor-to-backing mapping.
+pub struct RingResizePlan {
+    tail: u32,
+    len: usize,
+    old_capacity: usize,
+    new_capacity: usize,
+}
+
+impl RingResizePlan {
+    pub fn new(head: u32, tail: u32, old_capacity: usize, new_capacity: usize) -> Option<Self> {
+        let len = head.wrapping_sub(tail) as usize;
+        if old_capacity < 4096 || !old_capacity.is_power_of_two()
+            || !new_capacity.is_power_of_two() || new_capacity < old_capacity
+            || new_capacity > u32::MAX as usize || len > old_capacity
+        {
+            return None;
+        }
+        Some(Self { tail, len, old_capacity, new_capacity })
+    }
+
+    /// Callbacks access backing offsets, splitting at physical page boundaries
+    /// if necessary. Scratch is prepared before committing any backing change.
+    pub fn copy(
+        &self,
+        scratch: &mut [u8],
+        mut read: impl FnMut(usize, &mut [u8]),
+        mut write: impl FnMut(usize, &[u8]),
+    ) {
+        assert!(scratch.len() >= self.len);
+        let old_offset = self.tail as usize % self.old_capacity;
+        let first = self.len.min(self.old_capacity - old_offset);
+        read(old_offset, &mut scratch[..first]);
+        read(0, &mut scratch[first..self.len]);
+        let new_offset = self.tail as usize % self.new_capacity;
+        let first = self.len.min(self.new_capacity - new_offset);
+        write(new_offset, &scratch[..first]);
+        write(0, &scratch[first..self.len]);
+    }
+}
+
+/// A checked RX write spanning at most two backing pages. Construction never
+/// touches shared memory; the producer validates both HPAs before copying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RxWritePlan {
+    pub offset: usize,
+    pub first_len: usize,
+    pub second_offset: usize,
+    pub second_len: usize,
+    pub next_head: u32,
+}
+
+impl RxWritePlan {
+    pub fn new(head: u32, tail: u32, capacity: usize, total: usize) -> Option<Self> {
+        if capacity < 4096 || !capacity.is_power_of_two() || capacity > u32::MAX as usize
+            || total < core::mem::size_of::<MsgHeader>() || total > 4096
+        {
+            return None;
+        }
+        let used = head.wrapping_sub(tail) as usize;
+        if used > capacity || total > capacity - used {
+            return None;
+        }
+        let offset = head as usize % capacity;
+        let first_len = total.min(4096 - offset % 4096);
+        Some(Self {
+            offset,
+            first_len,
+            second_offset: (offset + first_len) % capacity,
+            second_len: total - first_len,
+            next_head: head.wrapping_add(total as u32),
+        })
+    }
+}
+
+#[cfg(test)]
+mod rx_tests {
+    use super::*;
+
+    #[test]
+    fn growth_preserves_wrapped_unread_bytes_in_place() {
+        use core::cell::RefCell;
+        for tail in [4090u32, 8186, u32::MAX - 5] {
+            let backing = RefCell::new([0u8; 8192]);
+            for i in 0..32 {
+                backing.borrow_mut()[tail.wrapping_add(i) as usize % 4096] = i as u8;
+            }
+            let plan = RingResizePlan::new(tail.wrapping_add(32), tail, 4096, 8192).unwrap();
+            plan.copy(&mut [0u8; 4096],
+                |off, bytes| bytes.copy_from_slice(&backing.borrow()[off..off + bytes.len()]),
+                |off, bytes| backing.borrow_mut()[off..off + bytes.len()].copy_from_slice(bytes));
+            for i in 0..32 {
+                assert_eq!(backing.borrow()[tail.wrapping_add(i) as usize % 8192], i as u8);
+            }
+        }
+        assert!(RingResizePlan::new(4097, 0, 4096, 8192).is_none());
+        assert!(RingResizePlan::new(0, 1, 4096, 8192).is_none());
+        assert!(RingResizePlan::new(0, 0, 8192, 4096).is_none());
+    }
+
+    #[test]
+    fn reservation_is_all_or_nothing_across_pages_and_cursor_rollover() {
+        let plan = RxWritePlan::new(4090, 100, 8192, 48).unwrap();
+        assert_eq!((plan.first_len, plan.second_offset, plan.second_len), (6, 4096, 42));
+        let plan = RxWritePlan::new(u32::MAX - 5, u32::MAX - 100, 8192, 48).unwrap();
+        assert_eq!((plan.offset, plan.first_len, plan.second_offset, plan.next_head),
+                   (8186, 6, 0, 42));
+        assert!(RxWritePlan::new(8190, 0, 8192, 48).is_none());
+        assert!(RxWritePlan::new(10, 11, 8192, 48).is_none());
+        assert!(RxWritePlan::new(0, 0, 0, 48).is_none());
+        assert_eq!(ring_capacity(15), Some(32768));
+    }
+}
+
 // ── Binary attestation report ────────────────────────────────────────────── //
 
 /// Binary attestation report header (variable-length payload follows).
@@ -110,6 +237,7 @@ pub const MAX_PAYLOAD: usize = 4096 - core::mem::size_of::<MsgHeader>();
 ///   `MemCapEntry[nr_mem_caps]`
 ///   `DomCapEntry[nr_dom_caps]`
 ///   `PaMapEntry[nr_pa_entries]`
+///   `DoorbellEntry[nr_doorbells]` (flag `DOMCOMM_ATTEST_F_DOORBELLS`)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct AttestReport {
@@ -122,7 +250,72 @@ pub struct AttestReport {
     pub nr_pa_entries: u32,
     pub chunk_index: u16,
     pub total_chunks: u16,
-    pub reserved: u32,
+    pub nr_doorbells: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DoorbellEntry {
+    pub recipient: u64,
+    pub port: u64,
+    pub handle: u64,
+    pub vp: u64,
+    pub vector: u8,
+    pub kind: u8,
+    pub reserved: [u8; 6],
+}
+
+/// Resolve an attested endpoint identity to the reporting domain's local handle.
+/// Tree-only records do not grant invocation authority.
+pub fn find_attested_doorbell(
+    report: &[u8],
+    recipient: u64,
+    port: u64,
+) -> Result<DoorbellEntry, u64> {
+    use crate::errors::{ERR_INVALID, ERR_NOTFOUND};
+    use core::mem::size_of;
+
+    if report.len() < size_of::<AttestReport>() {
+        return Err(ERR_INVALID);
+    }
+    // SAFETY: the length was checked; the report need not be aligned.
+    let header = unsafe { core::ptr::read_unaligned(report.as_ptr().cast::<AttestReport>()) };
+    if header.flags & DOMCOMM_ATTEST_F_DOORBELLS == 0 || header.flags & 2 != 0 {
+        if header.nr_doorbells != 0 || header.flags & 2 != 0 {
+            return Err(ERR_INVALID);
+        }
+        return Err(ERR_NOTFOUND);
+    }
+    let mut offset = size_of::<AttestReport>();
+    for (count, size) in [
+        (header.nr_mem_caps, size_of::<MemCapEntry>()),
+        (header.nr_dom_caps, size_of::<DomCapEntry>()),
+        (header.nr_pa_entries, size_of::<PaMapEntry>()),
+    ] {
+        offset = (count as usize).checked_mul(size)
+            .and_then(|len| offset.checked_add(len)).ok_or(ERR_INVALID)?;
+    }
+    let count = header.nr_doorbells as usize;
+    let end = count.checked_mul(size_of::<DoorbellEntry>())
+        .and_then(|len| offset.checked_add(len)).ok_or(ERR_INVALID)?;
+    let entries = report.get(offset..end).ok_or(ERR_INVALID)?;
+    let mut found = None;
+    for bytes in entries.chunks_exact(size_of::<DoorbellEntry>()) {
+        // SAFETY: chunks_exact supplies a complete entry; alignment is not assumed.
+        let entry = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<DoorbellEntry>()) };
+        if entry.port == 0 || entry.kind > 1 || (entry.kind == 0 && entry.vp != 0)
+            || entry.reserved != [0; 6]
+        {
+            return Err(ERR_INVALID);
+        }
+        if entry.recipient == recipient && entry.port == port && entry.handle != u64::MAX {
+            if found.is_some() {
+                return Err(ERR_INVALID);
+            }
+            found = Some(entry);
+        }
+    }
+    found.ok_or(ERR_NOTFOUND)
 }
 
 /// Memory capability entry in the attestation report.
@@ -198,19 +391,13 @@ pub const THEMIC_INTERCEPT_MSG_SIZE: usize = 120;
 
 // ── Error message ────────────────────────────────────────────────────────── //
 
-/// DOORBELL_NOTIFY payload (capavisor → domain, on the RX ring).
-///
-/// Written when an EPT violation matches a registered doorbell entry.
-/// The child VP is NOT stopped; it resumes immediately after the fast-path.
+/// Capability-authorized notification. The port is scoped to the recipient;
+/// it is not the sender's local capability handle.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct DoorbellNotify {
-    pub doorbell_id: u32, // matches the id returned by REGISTER_DOORBELL
-    pub reserved: u32,
-    pub gpa: u64,   // guest physical address that was written
-    pub value: u64, // data value written by the guest
-    pub size: u32,  // write size in bytes (1/2/4/8)
-    pub reserved2: u32,
+pub struct DoorbellEvent {
+    pub port: u64,
+    pub value: u64,
 }
 
 // ── Error message ────────────────────────────────────────────────────────── //
@@ -249,8 +436,8 @@ pub struct AttestRequest {
 }
 
 /// Signed attestation envelope, appended after the common-base attestation
-/// payload (the same `[AttestReport][MemCapEntry[]][DomCapEntry[]][PaMapEntry[]]`
-/// that the unsigned path produces) when the caller asked for a signed report.
+/// payload (header, capabilities, PA map and notification bindings, as on the
+/// unsigned path) when the caller asked for a signed report.
 ///
 /// Wire layout of a signed attestation message:
 ///
@@ -259,6 +446,7 @@ pub struct AttestRequest {
 /// [ MemCapEntry × nr_mem_caps ]
 /// [ DomCapEntry × nr_dom_caps ]
 /// [ PaMapEntry  × nr_pa_entries ]
+/// [ DoorbellEntry × nr_doorbells ]
 /// ─────── common base ends here ───────
 /// [ SignedEnvelope (168B) ]
 /// [ tpm_quote (tpm_quote_size bytes) ]   (optional, 0 if no TPM)
@@ -271,7 +459,7 @@ pub struct AttestRequest {
 ///
 /// Verification steps (see `thhv/test/test_attestation.c`):
 /// 1. Locate envelope at offset
-///    `40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24`.
+///    `40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24 + nr_doorbells*40`.
 /// 2. Verify `Ed25519_verify(pub_key, SHA-256(base_bytes ‖ nonce ‖ user_pub_key), signature)`.
 /// 3. If `tpm_quote_size > 0`: verify TPM quote signature under `ak_pub` and
 ///    that `PCR[11]` in the quote matches `SHA-256(capavisor_binary ‖ pub_key)`.
@@ -346,13 +534,14 @@ const _: () = {
     assert!(core::mem::size_of::<RingMeta>() == 16);
     assert!(core::mem::size_of::<MsgHeader>() == 16);
     assert!(core::mem::size_of::<AttestReport>() == 40);
+    assert!(core::mem::size_of::<DoorbellEntry>() == 40);
     assert!(core::mem::size_of::<MemCapEntry>() == 40);
     assert!(core::mem::size_of::<DomCapEntry>() == 16);
     assert!(core::mem::size_of::<PaMapEntry>() == 24);
     assert!(core::mem::size_of::<GrowRequest>() == 24);
     assert!(core::mem::size_of::<GrowAck>() == 16);
     assert!(core::mem::size_of::<VpExit>() == 128);
-    assert!(core::mem::size_of::<DoorbellNotify>() == 32);
+    assert!(core::mem::size_of::<DoorbellEvent>() == 16);
     assert!(core::mem::size_of::<ErrorMsg>() == 16);
     assert!(core::mem::size_of::<EnumCapReq>() == 8);
     assert!(core::mem::size_of::<AttestRequest>() == 64);
@@ -380,6 +569,49 @@ impl DomCommMessage for GrowAck {
     const MSG_TYPE: u32 = msg_types::GROW_ACK;
 }
 
-impl DomCommMessage for DoorbellNotify {
-    const MSG_TYPE: u32 = msg_types::DOORBELL_NOTIFY;
+impl DomCommMessage for DoorbellEvent {
+    const MSG_TYPE: u32 = msg_types::DOORBELL_EVENT;
+}
+
+#[cfg(test)]
+mod doorbell_attest_tests {
+    use super::*;
+    use crate::errors::{ERR_INVALID, ERR_NOTFOUND};
+
+    fn inventory() -> [u8; 120] {
+        let mut bytes = [0; 120];
+        bytes[8..12].copy_from_slice(&DOMCOMM_ATTEST_F_DOORBELLS.to_le_bytes());
+        bytes[36..40].copy_from_slice(&2u32.to_le_bytes());
+        for (index, handle) in [u64::MAX, 17].into_iter().enumerate() {
+            let off = 40 + index * 40;
+            bytes[off..off + 8].copy_from_slice(&7u64.to_le_bytes());
+            bytes[off + 8..off + 16].copy_from_slice(&9u64.to_le_bytes());
+            bytes[off + 16..off + 24].copy_from_slice(&handle.to_le_bytes());
+            bytes[off + 32] = 38;
+        }
+        bytes
+    }
+
+    #[test]
+    fn lookup_requires_held_authority_and_exact_recipient_port() {
+        let mut bytes = inventory();
+        assert_eq!(find_attested_doorbell(&bytes, 7, 9).unwrap().handle, 17);
+        assert!(matches!(find_attested_doorbell(&bytes, 8, 9), Err(ERR_NOTFOUND)));
+        bytes[96..104].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(find_attested_doorbell(&bytes, 7, 9), Err(ERR_NOTFOUND)));
+    }
+
+    #[test]
+    fn malformed_or_ambiguous_inventory_is_rejected() {
+        let mut bytes = inventory();
+        assert!(matches!(find_attested_doorbell(&bytes[..119], 7, 9), Err(ERR_INVALID)));
+        bytes[56..64].copy_from_slice(&18u64.to_le_bytes());
+        assert!(matches!(find_attested_doorbell(&bytes, 7, 9), Err(ERR_INVALID)));
+        let mut bytes = inventory();
+        bytes[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(find_attested_doorbell(&bytes, 7, 9), Err(ERR_INVALID)));
+        let mut bytes = inventory();
+        bytes[119] = 1;
+        assert!(matches!(find_attested_doorbell(&bytes, 7, 9), Err(ERR_INVALID)));
+    }
 }

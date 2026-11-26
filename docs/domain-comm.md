@@ -1,5 +1,15 @@
 # Domain Communication Region — Design v0.2
 
+> **Implementation update (DomainComm 1.0):** This document retains the
+> original design sketches. The notification and attestation formats in
+> section 7 below describe the current implementation. In particular, the
+> older ring sketches in sections 5–6 are not the current ABI: logical
+> capacity is the largest power of two within the backing pages, RX messages
+> may cross page/ring boundaries, and all driver RX consumers are serialized.
+> Version 1 intentionally rejects older driver/monitor major versions.
+> The authoritative Rust/C layouts are `themis/crates/themis-abi/src/domcomm.rs`
+> and `thhv/inc/thhv.h`.
+
 ## 1. Problem
 
 The capavisor and a domain need a bidirectional communication channel for data
@@ -73,8 +83,14 @@ CPUID leaf 0x40000002  (DomainComm Discovery):
   EAX = base GPA, low 32 bits
   EBX = base GPA, high 32 bits
   ECX = region size in pages
-  EDX = flags (reserved, 0)
+  EDX = flags: bit 0 = per-page discovery; bit 1 = synchronous GROW completion
 ```
+
+With bit 0 set, subleaf `N+1` returns page `N`'s GPA in EAX:EBX and ECX=1
+(ECX=0 for an invalid index). Page order is header, RX backing, TX backing.
+Each page is mapped separately; neither guest nor host contiguity is required.
+Subleaf 0 returns the header GPA and total page count. A domain without its
+own DomainComm receives zero, never dom0's locator.
 
 ### Driver Init Sequence
 
@@ -154,7 +170,7 @@ Offset   Size    Field                  Producer    Description
 0x040    4       tx_capacity            capavisor   Total ring size in bytes
 
 ─── Notification ───────────────────────────────────────────────────────
-0x050    4       notify_vector          domain      IDT vector for RX notifications
+0x050    4       notify_vector          reserved    Legacy global-vector field; unused
 0x054    4       notify_flags           both        Notification control flags
 
 0x100  3840      reserved
@@ -278,6 +294,8 @@ producer for TX.
 #define DOMCOMM_MSG_DOMAIN_EVENT    0x0004  /* Child domain state change */
 #define DOMCOMM_MSG_ERROR           0x0005  /* Error / backpressure signal */
 #define DOMCOMM_MSG_GROW_ACK        0x0006  /* Acknowledge ring growth */
+/* 0x0007 retired: address-matched notifications */
+#define DOMCOMM_MSG_DOORBELL_EVENT  0x0008  /* Capability-authorized port/value */
 
 /* ── Domain → Capavisor (TX ring) ──────────────────────────── */
 #define DOMCOMM_MSG_ATTEST_REQ      0x0100  /* Request (self-)attestation */
@@ -290,9 +308,14 @@ producer for TX.
 
 ### DOMCOMM_MSG_ATTEST — Binary Attestation Report
 
-Delivered to RX ring at bootstrap (dom0: pre-populated) or in response to
-ATTEST_REQ.  Large reports are split across multiple messages with sequence
-numbers for reassembly.
+The domain invokes `ATTEST_SELF` to publish a report chunk on its RX ring.
+Signed mode first supplies an `AttestRequest` on TX. At byte offset zero,
+the capavisor retains one engine-derived report snapshot, including the
+signature and optional TPM tail. Each call publishes at most 4080 payload
+bytes; later offsets read the same snapshot without consuming another TX
+request. Hypercall results give total report size and bytes written.
+`chunk_index` and `total_chunks` are currently fixed at `(0, 1)`; they are
+not the reassembly mechanism. Ring-full returns ERR_BUSY before publication.
 
 ```
 Attestation payload (binary, 40-byte header + variable-length arrays):
@@ -305,12 +328,13 @@ Offset   Size    Field
 0x14     4       nr_mem_caps     Number of memory capability entries
 0x18     4       nr_dom_caps     Number of domain capability entries
 0x1C     4       nr_pa_entries   Number of PA map (GPA→HPA) entries
-0x20     2       chunk_index     0-based (0 if single message)
-0x22     2       total_chunks    1 if entire report fits in one msg
-0x24     4       reserved
+0x20     2       chunk_index     Currently 0 (use hypercall offsets)
+0x22     2       total_chunks    Currently 1 (use hypercall offsets)
+0x24     4       nr_doorbells     Number of doorbell entries
 0x28     ...     mem_caps[]      Array of mem_cap_entry
                  dom_caps[]      Array of dom_cap_entry
                  pa_map[]        Array of pa_map_entry
+                 doorbells[]     Array of doorbell_entry
 
 Each mem_cap_entry (40 bytes):
   +0x00  u64  handle         Local handle in caller's table
@@ -328,10 +352,60 @@ Each pa_map_entry (24 bytes):
   +0x00  u64  gpa_start      Guest Physical Address start
   +0x08  u64  hpa_start      Host Physical Address start
   +0x10  u64  size           Range size in bytes
+
+Each doorbell_entry (40 bytes):
+  +0x00  u64  recipient     Destination domain ID
+  +0x08  u64  port          Stable recipient-tree identity
+  +0x10  u64  handle        Held local handle, or u64::MAX for tree-only entry
+  +0x18  u64  vp            Async target VP; zero for Sync
+  +0x20  u8   vector        Interrupt vector
+  +0x21  u8   kind          Sync=0, Async=1
+  +0x22  u8[6] reserved     Zero
 ```
+
+All fields are little-endian. `DOMCOMM_ATTEST_F_DOORBELLS` (`1 << 2`) is
+always set, even for an empty inventory. The retired notification-format
+flag (`1 << 1`) is rejected by current readers. The engine reports both
+recipient-tree objects and held invocation capabilities, not CHV device
+matching or Linux subscriptions. There is no count word after the PA map.
+
+Signed reports append a 168-byte `SignedEnvelope` after **all** arrays,
+followed by any TPM quote, TPM signature and AK public-key blobs. Its offset is:
+
+```text
+40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24 + nr_doorbells*40
+```
+
+The Ed25519 signature covers
+`SHA-256(common_base || nonce || user_pub_key)`, where `common_base` includes
+the header and every array, including doorbells. Linux eventfd
+subscriptions do not appear in the report.
+See the [engine doorbell model](capability-engine/semantics.md#doorbell-capabilities)
+and [attestation reference](architecture/attestation.md#21-current-domain-report-format)
+for authority/lifetime and verification details.
 
 The driver parses this to populate the GPA→HPA translation tree AND learn
 its capability handles for subsequent VMCALL operations.
+
+### DOMCOMM_MSG_DOORBELL_EVENT — Notification Delivery
+
+`NOTIFY(handle, value)` uses a held doorbell capability. The engine validates
+authority, interrupt policy and target before the platform publishes this
+16-byte payload in the recipient's RX ring:
+
+```text
++0x00  u64  port           Engine-selected recipient port
++0x08  u64  value          Value supplied by the source
+```
+
+Sync validates the complete active caller chain and returns to the blocked
+recipient VP through the ordinary interrupt unwind. Async posts to its
+stored target VP without returning the sender's CPU. Queue-full returns
+ERR_BUSY without publication or handoff. The driver dispatches subscriptions
+by recipient port regardless of which thread drains the ring.
+Attestation and growth exchanges dispatch interleaved doorbell messages
+under the common RX lock. An unsubscribed stale ID is ignored; removing
+authority does not retract entries already queued.
 
 ### DOMCOMM_MSG_ENUM_CAP — Single Capability Enumeration
 
@@ -380,18 +454,29 @@ RX (response via DOMCOMM_MSG_ATTEST with single entry):
 After bootstrap, the driver can grow the rings dynamically:
 
 ```
-1. Driver allocates new page(s) via alloc_pages()
-2. Driver translates GPA→HPA (now possible — PA map is loaded)
-3. Driver CARVEs a new memory capability for the pages
+1. Driver allocates and maps a page and prepares its enlarged local pointer array
+2. Driver translates that page's GPA to HPA using the PA map
+3. Driver CARVEs the page and REGISTER_COMM(cap, SELF_CAPABILITY, UINT32_MAX)
 4. Driver sends DOMCOMM_MSG_GROW_RX or DOMCOMM_MSG_GROW_TX on TX ring:
    Payload:
      +0x00  u64  cap_handle    Handle of CARVEd capability
-     +0x08  u64  nr_pages      Number of new pages
-5. Capavisor maps new pages, extends the ring:
-   a. Updates rx_capacity or tx_capacity in page 0 header
-   b. Sends DOMCOMM_MSG_GROW_ACK on RX ring
-6. Driver reads ACK, updates its local ring state
+     +0x08  u64  cap_sub       Carve subhandle
+     +0x10  u32  nr_pages      Number of new pages
+     +0x14  u32  reserved      Zero
+5. DOMCOMM_NOTIFY validates the self COMM capability and adopts the page under
+   the engine operation lock and DomainComm lock. All fallible allocation
+   happens first. Unread bytes are preserved across the capacity change.
+6. NOTIFY returns completion in registers (status, new page count, new logical
+   capacity), not an ACK in the ring being resized. The driver installs its
+   prepared pointer array before unlocking or consuming more messages.
 ```
+
+This completion requires CPUID flag bit 1; the driver rejects growth without
+it. Failure does not adopt the requested page. Success retains the allocation
+for the domain's lifetime, including driver reloads. A multi-page ioctl repeats
+the single-page exchange; partial progress is retained and an error is reported.
+Revoking any active DomainComm backing disables that domain's channel before
+the memory is cleared or returned; reinitialization is not implicit.
 
 ### Non-Contiguous Backing Pages
 
@@ -404,6 +489,10 @@ the capavisor handles scatter-gather mapping.  However, the driver side uses
 `memremap()` per segment and maintains an iovec-like structure for ring access.
 
 ## 10. Async VP Exit Delivery
+
+**Deferred design, not implemented.** The global notification-vector setter
+was removed. Any future wakeup must use capability-authorized delivery;
+the historical sketch below does not define a supported runtime interface.
 
 When a child VP exits in async mode:
 

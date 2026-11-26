@@ -140,16 +140,8 @@ pub extern "C" fn themis_seal(domain: u64) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn themis_revoke_mem(parent: u64, child_sub: u64) -> i32 {
-    match revoke_mem(parent, child_sub) {
-        Ok(()) => 0,
-        Err(e) => to_errno(e),
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn themis_revoke_domain(domain: u64) -> i32 {
-    match revoke_domain(domain) {
+pub extern "C" fn themis_revoke(parent: u64, child_sub: u64) -> i32 {
+    match revoke(parent, child_sub) {
         Ok(()) => 0,
         Err(e) => to_errno(e),
     }

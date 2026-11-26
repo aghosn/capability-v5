@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * thhv_translate.c — dom0 GPA → HPA address translation.
+ * thhv_translate.c — calling-domain GPA → HPA address translation.
  *
- * dom0 runs as a guest under the capavisor, so Linux page_to_pfn() yields
+ * Linux runs as a guest under the capavisor, so page_to_pfn() yields
  * Guest Physical Addresses (GPAs), not Host Physical Addresses (HPAs).
- * CARVE/ALIAS/SEND capability operations require HPAs (addresses relative
- * to dom0's root memory capability).
+ * CARVE/ALIAS/SEND capability operations require HPAs within owned capabilities.
  *
  * This module maintains a GPA→HPA mapping derived from the attestation
- * report that the capavisor provides to dom0 at boot.  Userspace loads
- * the map via the THHV_SET_PA_MAP ioctl before issuing any memory
- * operations.
+ * report requested at module initialization. Userspace can replace the map
+ * via THHV_SET_PA_MAP.
  *
  * If no map has been loaded (e.g. during testing on bare metal), all
  * translations fall through as identity (GPA == HPA).
@@ -291,10 +289,30 @@ u64 thhv_gpa_to_hpa(u64 gpa)
 	return hpa;
 }
 
+int thhv_hpa_to_gpa(u64 hpa, u64 *gpa)
+{
+	struct rb_node *node;
+	int ret = -ENXIO;
+
+	read_lock(&pa_map_lock);
+	for (node = rb_first(&pa_map); node; node = rb_next(node)) {
+		struct thhv_pa_range *range =
+			rb_entry(node, struct thhv_pa_range, node);
+
+		if (hpa >= range->hpa_start && hpa - range->hpa_start < range->size) {
+			*gpa = range->gpa_start + hpa - range->hpa_start;
+			ret = 0;
+			break;
+		}
+	}
+	read_unlock(&pa_map_lock);
+	return ret;
+}
+
 /* ── Translation: contiguous GPA range → HPA segments ──────────────────────── */
 
 /*
- * thhv_translate_range — translate dom0 GPA range [gpa, gpa+size) to HPAs.
+ * thhv_translate_range — translate caller GPA range [gpa, gpa+size) to HPAs.
  *
  * The GPA range may span multiple PA map entries, yielding multiple
  * non-contiguous HPA segments.  Adjacent HPA segments are coalesced.
@@ -386,7 +404,7 @@ int thhv_translate_range(u64 gpa_start, u64 size,
 /*
  * thhv_translate_pages — translate pinned struct page[] to HPA segments.
  *
- * Takes pages obtained from pin_user_pages_fast, extracts dom0 GPAs via
+ * Takes pages obtained from pin_user_pages_fast, extracts caller GPAs via
  * page_to_pfn, translates through the PA map, and returns coalesced HPA
  * segments suitable for CARVE/ALIAS calls.
  */
@@ -535,24 +553,28 @@ int thhv_pa_map_init_from_attestation(void)
 	if (ret)
 		return ret;
 
+	mutex_lock(&thhv_domcomm_lock);
 	/* First hypercall: discover the full report size, also enqueues
 	 * the first chunk on the RX ring. */
 	ret = themis_attest_self(0, 0, 0, &total_size, &wrote);
 	if (ret) {
 		pr_err("thhv: ATTEST_SELF hypercall failed (%d)\n", ret);
-		return ret;
+		goto out_free;
 	}
 	if (total_size == 0 || total_size > (16ULL << 20)) {
 		pr_err("thhv: ATTEST_SELF returned implausible total %llu\n",
 		       total_size);
-		return -EPROTO;
+		ret = -EPROTO;
+		goto out_free;
 	}
 	pr_info("thhv: ATTEST_SELF — %llu bytes total (first chunk %llu)\n",
 		total_size, wrote);
 
 	buf = kvzalloc(total_size, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
+	if (!buf) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
 
 	/* Dequeue chunks one at a time; re-issue ATTEST_SELF with the
 	 * running offset until the whole report is reassembled. */
@@ -598,6 +620,7 @@ int thhv_pa_map_init_from_attestation(void)
 	}
 
 	report = (struct domcomm_attest_report *)buf;
+	thhv_domcomm.domain_id = report->domain_id;
 
 	pr_info("thhv: attestation: domain_id=%llu flags=%#x vps=%u "
 		"mem_caps=%u dom_caps=%u pa_entries=%u\n",
@@ -609,7 +632,13 @@ int thhv_pa_map_init_from_attestation(void)
 		size_t expected = sizeof(struct domcomm_attest_report)
 			+ (size_t)report->nr_mem_caps * sizeof(struct domcomm_mem_cap_entry)
 			+ (size_t)report->nr_dom_caps * sizeof(struct domcomm_dom_cap_entry)
-			+ (size_t)report->nr_pa_entries * sizeof(struct domcomm_pa_map_entry);
+			+ (size_t)report->nr_pa_entries * sizeof(struct domcomm_pa_map_entry)
+			+ (size_t)report->nr_doorbells * sizeof(struct domcomm_doorbell_entry);
+		if (!(report->flags & DOMCOMM_ATTEST_F_DOORBELLS) ||
+		    (report->flags & (1U << 1))) {
+			ret = -EPROTO;
+			goto out_free;
+		}
 		if (total_size < expected) {
 			pr_err("thhv: attestation payload too small for declared entries "
 			       "(%llu < %zu)\n", total_size, expected);
@@ -643,31 +672,9 @@ int thhv_pa_map_init_from_attestation(void)
 	pr_info("thhv: capability table loaded (%u entries from attestation)\n",
 		report->nr_mem_caps);
 
-	/* Skip past dom_cap entries, but extract the self-domain handle. */
+	/* Skip memory and domain capability inventories to reach the PA map. */
 	cursor += (size_t)report->nr_mem_caps * sizeof(struct domcomm_mem_cap_entry);
-	{
-		struct domcomm_dom_cap_entry *dom_caps =
-			(struct domcomm_dom_cap_entry *)cursor;
-
-		thhv_domcomm.self_domain_handle = 0;
-		for (i = 0; i < report->nr_dom_caps; i++) {
-			pr_info("thhv:   dom_cap[%u]: handle=%llu domain_id=%llu\n",
-				i, dom_caps[i].handle, dom_caps[i].domain_id);
-			/* Self-referencing cap: domain_id == our own domain_id. */
-			if (dom_caps[i].domain_id == report->domain_id)
-				thhv_domcomm.self_domain_handle =
-					dom_caps[i].handle;
-		}
-
-		if (thhv_domcomm.self_domain_handle)
-			pr_info("thhv: self-domain handle = %llu\n",
-				thhv_domcomm.self_domain_handle);
-		else
-			pr_warn("thhv: no self-referencing domain capability found\n");
-
-		cursor += (size_t)report->nr_dom_caps *
-			  sizeof(struct domcomm_dom_cap_entry);
-	}
+	cursor += (size_t)report->nr_dom_caps * sizeof(struct domcomm_dom_cap_entry);
 
 	/* Parse PA map entries → populate the GPA→HPA rb-tree. */
 	pa_entries = (struct domcomm_pa_map_entry *)cursor;
@@ -714,6 +721,7 @@ int thhv_pa_map_init_from_attestation(void)
 
 out_free:
 	kvfree(buf);
+	mutex_unlock(&thhv_domcomm_lock);
 	return ret;
 }
 

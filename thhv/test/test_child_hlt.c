@@ -10,8 +10,8 @@
  *   5. CREATE_VP (2 META pages + 1 COMM page)
  *   6. SET_VP_STATE (RIP = 0x1000)
  *   7. INITIALIZE_PARTITION (seal)
- *   8. RUN_VP → block until child exits
- *   9. Verify exit_reason == 12 (HLT)
+ *   8. RUN_VP → driver parks halted VP; interrupt the wait with SIGALRM
+ *   9. Verify the COMM intercept is HLT and RUN_VP returned EINTR
  *
  * The child guest runs in 32-bit protected mode (unrestricted guest), no
  * paging, and executes a single HLT instruction at GPA 0x1000.  The
@@ -33,122 +33,26 @@
 #include <sys/mman.h>
 #include <linux/ioctl.h>
 #include <stdint.h>
+#include <signal.h>
 
 /* ── Constants ─────────────────────────────────────────────────────────────── */
 
-#define THHV_IOCTL_MAGIC       0xB8
-#define THHV_SCHED_SYNC        0
-#define THHV_META_PAGES_SHARED 4
-#define THHV_META_PAGES_PER_VP 3
-#define THEMIC_MSG_SLOT_SIZE   256
+#include "thhv.h"
+
 #define PAGE_SIZE_4K           4096
 
 /* Exit reasons (Intel SDM Vol 3C Appendix C). */
 #define EXIT_REASON_HLT        12
 
-/* ThemIC message types. */
-#define THEMIC_MSG_VP_INTERCEPT 0x0001
-
-/* Memory mapping rights. */
-#define THHV_MEM_R_READ  (1U << 0)
-#define THHV_MEM_R_WRITE (1U << 1)
-#define THHV_MEM_R_EXEC  (1U << 2)
-
-/* VP register discriminants (from thhv.h VpRegister). */
-#define THHV_VP_REG_RIP 0x11
-
-/* ── Ioctl structures ─────────────────────────────────────────────────────── */
-
-struct thhv_create_partition {
-	uint64_t cores_mask;
-	uint64_t api_flags;
-	uint32_t sched_policy;
-	uint32_t num_vps;
-};
-
-struct thhv_initialize_partition_meta {
-	uint64_t meta_uaddr;
-	uint64_t meta_size;
-};
-
-struct thhv_create_vp {
-	uint32_t vp_index;
-	uint32_t rsvd;
-	uint64_t meta_uaddr;
-	uint64_t meta_size;
-	uint64_t comm_uaddr;
-};
-
-struct thhv_set_guest_memory {
-	uint64_t guest_pfn;
-	uint64_t userspace_addr;
-	uint64_t size;
-	uint32_t flags;
-	uint32_t rights;
-	uint64_t attrs;
-};
-
-struct thhv_reg_name_value {
-	uint64_t name;
-	uint64_t value;
-};
-
-struct thhv_vp_registers {
-	uint32_t count;
-	uint32_t rsvd;
-	uint64_t regs;  /* pointer to array of thhv_reg_name_value */
-};
-
-struct thhv_run_vp {
-	uint8_t msg_buf[THEMIC_MSG_SLOT_SIZE];
-};
-
-/* Intercept message header (matches capavisor ThemicMessageHeader). */
-struct themic_message_header {
-	uint32_t message_type;
-	uint32_t payload_size;
-	uint64_t sequence;
-};
-
-/* Intercept message (matches capavisor InterceptMessage, 120 bytes). */
-struct themic_intercept_message {
-	struct themic_message_header header;
-	uint32_t exit_reason;
-	uint32_t instruction_length;
-	uint64_t exit_qualification;
-	uint64_t guest_physical_address;
-	uint64_t guest_rip;
-	uint64_t guest_rflags;
-	uint16_t port_number;
-	uint8_t  access_size;
-	uint8_t  is_write;
-	uint32_t reserved;
-	uint64_t rax;
-	uint8_t  instruction_bytes[16];
-	uint64_t cpuid_rax, cpuid_rcx;
-	uint32_t msr_number;
-	uint32_t rsvd2;
-	uint64_t msr_value;
-};
-
-/* ── Ioctl numbers ─────────────────────────────────────────────────────────── */
-
-#define THHV_CREATE_PARTITION \
-	_IOWR(THHV_IOCTL_MAGIC, 0x01, struct thhv_create_partition)
-#define THHV_INITIALIZE_PARTITION \
-	_IO(THHV_IOCTL_MAGIC, 0x10)
-#define THHV_CREATE_VP \
-	_IOWR(THHV_IOCTL_MAGIC, 0x11, struct thhv_create_vp)
-#define THHV_SET_GUEST_MEMORY \
-	_IOW(THHV_IOCTL_MAGIC, 0x12, struct thhv_set_guest_memory)
-#define THHV_SEND_SHARED_META \
-	_IOW(THHV_IOCTL_MAGIC, 0x17, struct thhv_initialize_partition_meta)
-#define THHV_RUN_VP \
-	_IOWR(THHV_IOCTL_MAGIC, 0x20, struct thhv_run_vp)
-#define THHV_SET_VP_STATE \
-	_IOW(THHV_IOCTL_MAGIC, 0x22, struct thhv_vp_registers)
-
 /* ── Helpers ───────────────────────────────────────────────────────────────── */
+
+static volatile sig_atomic_t timed_out;
+
+static void timeout_handler(int signal)
+{
+	(void)signal;
+	timed_out = 1;
+}
 
 static void *alloc_pages(size_t n)
 {
@@ -221,7 +125,7 @@ int main(void)
 	if (!shared_meta)
 		FAIL("alloc shared META pages");
 	{
-		struct thhv_initialize_partition_meta ip = {
+		struct thhv_initialize_partition ip = {
 			.meta_uaddr = (uint64_t)(uintptr_t)shared_meta,
 			.meta_size  = THHV_META_PAGES_SHARED * PAGE_SIZE_4K,
 		};
@@ -297,25 +201,38 @@ int main(void)
 		FAIL("INITIALIZE_PARTITION: %s", strerror(errno));
 
 	/* ── 8. Run VP ──────────────────────────────────────────────────── */
-	STEP("Running VP (expecting HLT exit)...");
+	STEP("Running VP (expecting interruptible HLT wait)...");
 	{
 		struct thhv_run_vp run;
-		memset(&run, 0, sizeof(run));
-		if (ioctl(vp_fd, THHV_RUN_VP, &run) < 0)
-			FAIL("RUN_VP: %s", strerror(errno));
+		struct sigaction action = { .sa_handler = timeout_handler };
+		int result, run_errno;
 
-		/* Parse the intercept message. */
-		struct themic_intercept_message *msg =
-			(struct themic_intercept_message *)run.msg_buf;
+		sigemptyset(&action.sa_mask);
+		if (sigaction(SIGALRM, &action, NULL) < 0)
+			FAIL("sigaction: %s", strerror(errno));
+		memset(&run, 0, sizeof(run));
+		alarm(3);
+		do {
+			result = ioctl(vp_fd, THHV_RUN_VP, &run);
+			run_errno = errno;
+		} while (result < 0 && run_errno == EAGAIN && !timed_out);
+		alarm(0);
+		if (result != -1 || run_errno != EINTR || !timed_out)
+			FAIL("expected interrupted HLT wait, result=%d errno=%d",
+			     result, run_errno);
+
+		/* HLT is consumed by the driver; its intercept remains in COMM. */
+		struct themic_slim_intercept *msg =
+			(struct themic_slim_intercept *)((uint8_t *)vp_comm + 512);
 
 		printf("\n  Intercept message:\n");
 		printf("    message_type    = 0x%04x\n", msg->header.message_type);
 		printf("    exit_reason     = %u\n", msg->exit_reason);
 		printf("    instruction_len = %u\n", msg->instruction_length);
 		printf("    guest_rip       = 0x%lx\n",
-		       (unsigned long)msg->guest_rip);
+		       (unsigned long)thhv_comm_get_reg(vp_comm, THHV_VP_REG_RIP));
 		printf("    guest_rflags    = 0x%lx\n",
-		       (unsigned long)msg->guest_rflags);
+		       (unsigned long)thhv_comm_get_reg(vp_comm, THHV_VP_REG_RFLAGS));
 		printf("    exit_qual       = 0x%lx\n",
 		       (unsigned long)msg->exit_qualification);
 
@@ -328,7 +245,7 @@ int main(void)
 			     EXIT_REASON_HLT, msg->exit_reason);
 	}
 
-	printf("\n  ✓ Child executed HLT and exited correctly.\n");
+	printf("\n  Child HLT recorded; driver wait interrupted correctly.\n");
 
 cleanup:
 	if (vp_fd >= 0)

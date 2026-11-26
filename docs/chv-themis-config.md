@@ -1,5 +1,92 @@
 # CHV-side Themis policy configuration — design doc
 
+## Implemented device transport selection
+
+Set `"general": { "device_transport": "legacy" }` for trap-and-emulate
+device access, or `"general": { "device_transport": "pv" }` for voluntary
+shared requests and capability doorbells. Non-confidential guests default
+to `legacy`; confidential guests default to `pv` and reject `legacy`.
+PV requires a `comm` channel declaring Control and Platform services.
+CHV binds the selection into the bootstrap descriptor (header flag 1).
+Linux gates its PV device hooks on that flag, not on confidentiality.
+
+For multi-VP PV direct boot, CHV also advertises the standard ACPI MADT
+multiprocessor wakeup mailbox. Secondary VPs enter private guest waiting
+code with their initial state set before sealing. Linux supplies each
+target APIC ID and 64-bit trampoline address through the private mailbox;
+CHV schedules VPs without rewriting their registers afterward. The boot
+code, mailbox and identity tables occupy reserved EBDA memory
+`0xe8000..0xecfff`, outside the shared device arena. The version-0 ACPI
+interface does not support CPU offlining; legacy mode retains INIT/SIPI.
+The supplied `themis/policies/dom1-standard.json` selects legacy;
+`dom1-pv.json` selects non-confidential PV with the required shared regions;
+`dom1-confidential.json` selects confidential PV.
+
+Platform PIO operations 4/5 carry port, width (1/2/4) and write value;
+MMIO operations 6/7 carry device address, width (1/2/4/8) and write value.
+Reads return one width-bounded value. CHV accesses only its device buses,
+never guest instruction/register/private-memory decoding. Shared writes
+reuse userspace ioeventfd matching before device-bus dispatch; thhv only
+routes capability ports to eventfds, not service IDs or device addresses.
+
+Selected-PV Linux retains x2APIC when Themis advertises hardware x2APIC
+virtualization. Platform operation 8 carries an x2APIC-format fixed IPI;
+CHV resolves physical/logical destinations and shorthand against the
+configured guest APIC IDs. Operation 10 carries the caller VP's absolute
+TSC deadline (zero disarms), using the timer settings explicitly published
+by operation 11. Operation 11 carries the timer LVT (vector, mask and mode)
+and applies changes even while armed. A nonzero deadline fails if the guest
+has not configured TSC-deadline mode first; CHV never guesses settings or
+relies on virtual hardware readback. Operation 9 is retired because it
+accepted deadlines without prior timer configuration.
+These operations require zero unused operands and return
+zero on success; backend failures are reported through the shared completion.
+These requests publish the intended operands without exposing private CPU
+registers. NMI/INIT/SIPI delivery is not part of this shared IPI operation.
+Hosts without x2APIC virtualization still need guest LAPIC MMIO support.
+
+Parent-emulated deadlines use the guest's configured vector, suppress
+masked timers, and stop/join their worker on VP destruction. CHV uses a
+complete CPUID 0x15 ratio/crystal result for TSC frequency, or measures
+the TSC against a monotonic clock; it does not guess a crystal or CPU clock.
+The matching Linux PV implementation must be rebuilt with CHV.
+
+## Applied policy and shared RAM
+
+`policies.cores.allowed` and `mask` are mutually exclusive and drive the
+partition's actual core mask; invalid, duplicate, empty or out-of-range
+selections are rejected. The capability engine enforces the parent's limit.
+CPUID Native/Trap single-coordinate and inclusive-range overrides are
+applied alongside Emulate overrides. Explicit overrides take precedence
+over CHV's per-VP tables and the automatic Native hypervisor range;
+overlapping explicit overrides are rejected rather than silently ignored.
+
+Confidential `general.shared_regions` drives ALIAS carve-outs and their
+vTOM mirrors. Omission selects the EBDA/ACPI defaults (`0xa0000..0xe8000`
+and `0xed000..0x100000`); an explicit empty list shares no RAM.
+Ranges must be page-aligned, nonempty, nonoverlapping and below vTOM.
+PV private AP startup firmware cannot be declared shared.
+
+Selected-PV Linux also uses explicit shared requests for ACPI device fields,
+PCI ECAM, virtio registers and MSI-X tables. Ordinary RAM/table access stays
+local. Missing shared-MMIO bus devices return failed completions rather than
+the legacy path's accepted holes.
+
+Shared DMA integration is live-validated with two-CPU confidential and
+non-confidential PV Linux: SSH, storage, networking and clean shutdown. CPUID
+`0x40000005` locates the launch descriptor; its platform channel identifies
+the dynamically placed IO arena. This is separate from capavisor DomainComm
+(`0x40000002`). Linux reserves the arena, registers it as E820 RAM for page
+metadata, and uses a fixed restricted SWIOTLB pool for both coherent rings
+and streaming bounce buffers. No private fallback or dynamic growth is
+allowed. PV virtio devices advertise ACCESS_PLATFORM and receive a memory
+view containing only declared IO backing, with the same owned mappings used
+by the capability aliases; private RAM, control pages and the descriptor are
+absent. The supplied PV/confidential policies explicitly allocate a 24 MiB
+arena (the initial 1 MiB experiment exhausted during rootfs boot). Validation
+allows at most 24 MiB per IO arena and 32 MiB total backing, including control
+pages. Exhaustion remains an allocation failure, never implicit sharing.
+
 > **Status: DRAFT — iteration in progress.**  This file inventories the
 > Themis-specific behaviour CHV currently exposes, and proposes a
 > declarative config surface (JSON/YAML/TOML) so users and tests can
@@ -178,9 +265,9 @@ config, do not duplicate):
     "shared_regions": [            // confidential-mode ALIAS carve-outs
                                    // (memory that stays plaintext-shared in CoCo).
                                    // NOT ivshmem — see note above.
-                                   // Today hardcoded in vm_state.rs:76-158 (EBDA/ACPI).
-      { "name": "EBDA", "gpa": "0x9FC00", "size": "0x400" },
-      { "name": "ACPI", "gpa": "auto",    "size": "auto"  }
+                                   // Omit for platform defaults; [] for no shared RAM.
+      { "name": "EBDA/ACPI-low", "gpa": "0xA0000", "size": "0x48000" },
+      { "name": "ACPI-high", "gpa": "0xED000", "size": "0x13000" }
     ]
   },
 
@@ -197,10 +284,10 @@ config, do not duplicate):
     // DomainPolicy.api : MonitorAPI (bitmap of allowed monitor calls)
     "api": {
       "allow": "ALL"               // or explicit list: ["carve","alias","seal",
-                                   //   "send_channel","accept_channel","register_comm",
-                                   //   "revoke","get_chan","map_self","accept_at",
-                                   //   "send_memory_sealed","send_memory_unsealed",
-                                   //   "receive_after_seal"]
+                                   //   "create","set","get","send","attest",
+                                   //   "enumerate","switch","revoke","get_chan",
+                                   //   "map_self","receive_after_seal",
+                                   //   "create_doorbell","notify"]
                                    // Must be a subset of the parent's API.
     },
 

@@ -31,7 +31,7 @@ pub struct VcpuSlot {
     /// Physical address of this VP's Posted Interrupt Descriptor.
     /// Set by `put()` from the InactiveVcpu and never changes afterwards.
     /// Readable without taking the VP — safe because pid_phys is immutable
-    /// after the first `put()`.  0 for dom0 VPs (no PID).
+    /// after the first `put()`.
     pid_phys: core::sync::atomic::AtomicU64,
 }
 
@@ -86,7 +86,7 @@ impl VcpuSlot {
 
     /// Read the cached pid_phys without taking the VP.
     ///
-    /// Returns 0 if the VP has no PID (dom0) or the slot was never populated.
+    /// Returns 0 if the slot was never populated.
     /// Safe to call concurrently with `take()` / `put()` because pid_phys
     /// is immutable after the first `put()`.
     pub fn peek_pid_phys(&self) -> u64 {

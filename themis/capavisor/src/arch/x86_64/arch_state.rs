@@ -13,11 +13,9 @@ use core::cell::UnsafeCell;
 use capability_engine::{CoreId, Rights};
 use ept::{EptEntryFlags, EptMapper, EptMemoryType, Level};
 
-use crate::arch::x86_64::layout::{APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE, MMIO_PAGE_SIZE};
 use crate::arch_traits::{ArchDomain, ArchPlatform, ChangeRightsCtx};
 use crate::mem::{MetaAllocator, UncacheableRanges};
 use crate::platform::vcpu_slot::VcpuSlot;
-use crate::serial_println;
 
 use super::acpi::DhrdUnit;
 
@@ -35,14 +33,7 @@ pub struct ArchDomainState {
     iommu_pt: Option<EptMapper>,
     /// Per-VP slots holding InactiveVcpu when not running.
     vps: Vec<VcpuSlot>,
-    /// MSR bitmap page physical address (allocated from META at seal time).
-    msr_bitmap_phys: u64,
-    /// I/O bitmap A (ports 0x0000–0x7FFF) physical address.
-    io_bitmap_a_phys: u64,
-    /// I/O bitmap B (ports 0x8000–0xFFFF) physical address.
-    io_bitmap_b_phys: u64,
-    /// APIC access page physical address (for VIRTUALIZE_APIC_ACCESSES).
-    apic_access_phys: u64,
+    vp_bitmaps: Vec<[u64; 3]>,
 }
 
 impl ArchDomainState {
@@ -52,10 +43,7 @@ impl ArchDomainState {
             ept: None,
             iommu_pt: None,
             vps: Vec::new(),
-            msr_bitmap_phys: 0,
-            io_bitmap_a_phys: 0,
-            io_bitmap_b_phys: 0,
-            apic_access_phys: 0,
+            vp_bitmaps: Vec::new(),
         }
     }
 
@@ -84,38 +72,15 @@ impl ArchDomainState {
         &self.vps
     }
 
-    // ── Bitmap / APIC accessors ──────────────────────────────────────────── //
-
-    pub fn msr_bitmap_phys(&self) -> u64 {
-        self.msr_bitmap_phys
+    pub fn vp_bitmaps(&self, vp: usize) -> Option<[u64; 3]> {
+        self.vp_bitmaps.get(vp).copied()
     }
 
-    pub fn set_msr_bitmap_phys(&mut self, phys: u64) {
-        self.msr_bitmap_phys = phys;
-    }
-
-    pub fn io_bitmap_a_phys(&self) -> u64 {
-        self.io_bitmap_a_phys
-    }
-
-    pub fn set_io_bitmap_a_phys(&mut self, phys: u64) {
-        self.io_bitmap_a_phys = phys;
-    }
-
-    pub fn io_bitmap_b_phys(&self) -> u64 {
-        self.io_bitmap_b_phys
-    }
-
-    pub fn set_io_bitmap_b_phys(&mut self, phys: u64) {
-        self.io_bitmap_b_phys = phys;
-    }
-
-    pub fn apic_access_phys(&self) -> u64 {
-        self.apic_access_phys
-    }
-
-    pub fn set_apic_access_phys(&mut self, phys: u64) {
-        self.apic_access_phys = phys;
+    pub fn set_vp_bitmaps(&mut self, vp: usize, bitmaps: [u64; 3]) {
+        if self.vp_bitmaps.len() <= vp {
+            self.vp_bitmaps.resize(vp + 1, [0; 3]);
+        }
+        self.vp_bitmaps[vp] = bitmaps;
     }
 }
 
@@ -217,19 +182,8 @@ impl ArchPlatform for ArchPlatformState {
                 .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
         };
 
-        // INIT-IPI via xAPIC MMIO (the capavisor never enables x2APIC mode).
-        // INIT always causes EXIT_REASON_INIT_SIGNAL (3) from non-root mode,
-        // regardless of pin-based controls — exactly the wakeup semantics
-        // we want here.
-        let apic_base = hhdm_offset + LAPIC_MMIO_BASE;
-        // SAFETY: HHDM-mapped LAPIC MMIO; capavisor owns it exclusively.
         unsafe {
-            // ICR high: destination APIC ID in bits 24-31.
-            let icr_hi = (apic_base + APIC_REG_ICR_HIGH) as *mut u32;
-            core::ptr::write_volatile(icr_hi, lapic_id << 24);
-            // ICR low: delivery=INIT (0x5<<8), level=assert (1<<14), edge.
-            let icr_lo = (apic_base + APIC_REG_ICR_LOW) as *mut u32;
-            core::ptr::write_volatile(icr_lo, (1u32 << 14) | (0x5u32 << 8));
+            super::apic::send_monitor_ipi(lapic_id, hhdm_offset);
         }
     }
 
@@ -258,14 +212,6 @@ impl ArchDomain for ArchDomainState {
         rights: &Rights,
         ctx: &mut ChangeRightsCtx<'_>,
     ) {
-        // Child VMCSes never enable VIRTUALIZE_APIC_ACCESSES: they use
-        // x2APIC virtualization when available, otherwise software emulation.
-        // Keep xAPIC MMIO unmapped so any guest fallback reaches the parent.
-        if ctx.is_child && gpa == LAPIC_MMIO_BASE && size as u64 == MMIO_PAGE_SIZE {
-            self.set_apic_access_phys(hpa);
-            return;
-        }
-
         if rights.bits() == 0 {
             // Unmap.
             if let Some(ept) = self.ept.as_mut() {

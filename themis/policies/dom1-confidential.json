@@ -1,12 +1,62 @@
 {
   "extends": "confidential",
-  "general": { "name": "dom1-confidential" },
+  "general": {
+    "name": "dom1-confidential",
+    "confidential": true,
+    "device_transport": "pv"
+  },
+  "comm": {
+    "regions": [
+      {
+        "id": "control",
+        "kind": "alias",
+        "peer": "parent",
+        "gpa": "auto",
+        "size_per_vp": "0x1000",
+        "rights": "RW"
+      },
+      {
+        "id": "io",
+        "kind": "alias",
+        "peer": "parent",
+        "gpa": "auto",
+        "size": "0x1800000",
+        "rights": "RW"
+      }
+    ],
+    "channels": [
+      {
+        "id": "parent",
+        "protocol": "themis-pv/1",
+        "region": "control",
+        "io_region": "io",
+        "notification": "doorbell",
+        "scheduling": "sync",
+        "services": ["control", "platform"]
+      }
+    ]
+  },
   "policies": {
+    "exits": {
+      "default": {
+        "trap": true,
+        "read_set": "NONE",
+        "write_set": "NONE"
+      },
+      "overrides": [
+        {
+          "reason": "CR_ACCESS",
+          "trap": false,
+          "read_set": "NONE",
+          "write_set": "NONE"
+        }
+      ]
+    },
     "interrupts": {
       "default": {
         "visibility": "NotReport",
-        "read_set": "ALL",
-        "write_set": "ALL",
+        "read_set": "NONE",
+        "write_set": "NONE",
         "injectable": true
       }
     },
@@ -21,7 +71,18 @@
     },
     "cpuid": {
       "default": "Native",
-      "hypervisor_range_native": true
+      "hypervisor_range_native": true,
+      "overrides": [
+        {
+          "leaf": "0x40000100",
+          "subleaf": 0,
+          "action": "Emulate",
+          "eax": "auto:vtom_bit",
+          "ebx": "Them",
+          "ecx": "isCo",
+          "edx": "Co\u0000\u0000"
+        }
+      ]
     }
   }
 }

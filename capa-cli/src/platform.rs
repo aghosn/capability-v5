@@ -1,6 +1,6 @@
 //! CliPlatform: Platform implementation for the CLI simulator.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use parking_lot::{
@@ -18,6 +18,8 @@ struct CliPlatformInner {
     current_core: Option<CoreId>,
     /// VP register storage: (domain_id, vp_id, reg_id) → value
     registers: BTreeMap<(DomainId, u64, u64), u64>,
+    notifications: Vec<capability_engine::DoorbellNotification>,
+    pending_interrupts: BTreeSet<(DomainId, u64, u8)>,
 }
 
 struct CliSharedLock {
@@ -49,6 +51,8 @@ impl CliPlatform {
             inner: Arc::new(Mutex::new(CliPlatformInner {
                 current_core: None,
                 registers: BTreeMap::new(),
+                notifications: Vec::new(),
+                pending_interrupts: BTreeSet::new(),
             })),
             switch_manager: SwitchManager::new(num_cores),
         }
@@ -57,6 +61,22 @@ impl CliPlatform {
     /// Set the "currently executing" core ID used by VP-aware calls.
     pub fn set_current_core(&self, core: Option<CoreId>) {
         self.inner.lock().current_core = core;
+    }
+
+    pub fn doorbell_state(&self, recipient: DomainId) -> String {
+        let inner = self.inner.lock();
+        let mut output = String::new();
+        for event in inner.notifications.iter().filter(|e| e.doorbell.recipient == recipient) {
+            output.push_str(&format!(
+                "queued port={} value={} source={}:vp{} target=vp{} vector={:#x}\n",
+                event.doorbell.port_id, event.value, event.source, event.source_vp,
+                event.recipient_vp, event.doorbell.vector,
+            ));
+        }
+        for (_, vp, vector) in inner.pending_interrupts.iter().filter(|(id, _, _)| *id == recipient) {
+            output.push_str(&format!("pending interrupt vp{} vector={:#x}\n", vp, vector));
+        }
+        output
     }
 
     pub fn route_interrupt(
@@ -74,6 +94,29 @@ impl CliPlatform {
 }
 
 impl Platform for CliPlatform {
+    fn commit_doorbell(
+        &self,
+        notification: &capability_engine::DoorbellNotification,
+        commit: &mut dyn FnMut(),
+    ) -> Result<()> {
+        {
+            let mut inner = self.inner.lock();
+            if inner.notifications.iter()
+                .filter(|event| event.doorbell.recipient == notification.doorbell.recipient)
+                .count() >= 128
+            {
+                return Err(CapaError::NotificationQueueFull);
+            }
+            inner.notifications.push(*notification);
+            inner.pending_interrupts.insert((
+                notification.doorbell.recipient, notification.recipient_vp,
+                notification.doorbell.vector,
+            ));
+        }
+        commit();
+        Ok(())
+    }
+
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
         Ok(Box::new(CliSharedLock {
             _guard: self.op_lock.read_arc(),

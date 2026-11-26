@@ -1,0 +1,58 @@
+{
+  "extends": "standard",
+  "general": { "name": "dom1-pv", "device_transport": "pv" },
+  "comm": {
+    "regions": [
+      {
+        "id": "control",
+        "kind": "alias",
+        "peer": "parent",
+        "gpa": "auto",
+        "size_per_vp": "0x1000",
+        "rights": "RW"
+      },
+      {
+        "id": "io",
+        "kind": "alias",
+        "peer": "parent",
+        "gpa": "auto",
+        "size": "0x1800000",
+        "rights": "RW"
+      }
+    ],
+    "channels": [
+      {
+        "id": "parent",
+        "protocol": "themis-pv/1",
+        "region": "control",
+        "io_region": "io",
+        "notification": "doorbell",
+        "scheduling": "sync",
+        "services": ["control", "platform"]
+      }
+    ]
+  },
+  "policies": {
+    "interrupts": {
+      "default": {
+        "visibility": "NotReport",
+        "read_set": "ALL",
+        "write_set": "ALL",
+        "injectable": true
+      }
+    },
+    "msrs": {
+      "default": "Native",
+      "overrides": [
+        {
+          "msr": "0x6E0",
+          "action": "Trap"
+        }
+      ]
+    },
+    "cpuid": {
+      "default": "Native",
+      "hypervisor_range_native": true
+    }
+  }
+}

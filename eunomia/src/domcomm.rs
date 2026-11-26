@@ -41,6 +41,8 @@ pub enum DomCommError {
     RxEmpty,
     /// Message larger than provided buffer.
     BufferTooSmall(u32),
+    /// Invalid capacity, cursor distance or message length.
+    InvalidRing,
 }
 
 /// Raw CPUID wrapper (saves/restores rbx for PIC).
@@ -126,6 +128,7 @@ impl DomainComm {
 
         // Acquire-load the producer head.
         let head = unsafe { ptr::read_volatile(ptr::addr_of!((*hdr).rx.head)) };
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         let tail = unsafe { ptr::read_volatile(ptr::addr_of!((*hdr).rx.tail)) };
         let page_offset = unsafe { (*hdr).rx.page_offset };
         let page_count = unsafe { (*hdr).rx.page_count };
@@ -134,7 +137,12 @@ impl DomainComm {
             return Err(DomCommError::RxEmpty);
         }
 
-        let capacity = (page_count as usize) * 4096;
+        let capacity = domcomm::ring_capacity(page_count as usize)
+            .ok_or(DomCommError::InvalidRing)?;
+        let available = head.wrapping_sub(tail) as usize;
+        if available < core::mem::size_of::<domcomm::MsgHeader>() || available > capacity {
+            return Err(DomCommError::InvalidRing);
+        }
 
         // Read message header.
         let msg_hdr = self.ring_read_struct::<domcomm::MsgHeader>(
@@ -148,13 +156,21 @@ impl DomainComm {
         if msg_hdr.message_type == domcomm::msg_types::NONE {
             let wrapped = (tail as usize) % capacity;
             let page_remain = 4096 - (wrapped % 4096);
-            let new_tail = tail + page_remain as u32;
-            unsafe { ptr::write_volatile(ptr::addr_of_mut!((*hdr).rx.tail), new_tail) };
+            if page_remain > available {
+                return Err(DomCommError::InvalidRing);
+            }
+            let new_tail = tail.wrapping_add(page_remain as u32);
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+            unsafe { ptr::write_volatile(ptr::addr_of_mut!((*hdr).rx.tail), new_tail) };
             return self.rx_dequeue(buf);
         }
 
         let msg_hdr_size = core::mem::size_of::<domcomm::MsgHeader>() as u32;
+        if msg_hdr.total_size < msg_hdr_size || msg_hdr.total_size > 4096
+            || msg_hdr.total_size as usize > available
+        {
+            return Err(DomCommError::InvalidRing);
+        }
         let payload_size = msg_hdr.total_size - msg_hdr_size;
 
         if payload_size as usize > buf.len() {
@@ -165,19 +181,19 @@ impl DomainComm {
         self.ring_read_bytes(
             page_offset,
             page_count,
-            tail + msg_hdr_size,
+            tail.wrapping_add(msg_hdr_size),
             capacity,
             &mut buf[..payload_size as usize],
         );
 
         // Advance tail with release semantics.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         unsafe {
             ptr::write_volatile(
                 ptr::addr_of_mut!((*hdr).rx.tail),
-                tail + msg_hdr.total_size,
+                tail.wrapping_add(msg_hdr.total_size),
             )
         };
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
         Ok(RxMessage {
             msg_type: msg_hdr.message_type,

@@ -12,7 +12,7 @@
 #include <linux/slab.h>
 #include <linux/poll.h>
 #include <linux/mm.h>
-#include <asm/cpuid.h>
+#include <asm/processor.h>
 
 #include "thhv_internal.h"
 
@@ -125,6 +125,10 @@ static long thhv_test_cmd(void __user *uarg)
 		ret = domcomm_request_grow(false, cmd.arg ? cmd.arg : 1);
 		break;
 
+	case THHV_TEST_CMD_DOORBELL_IRQ:
+		ret = thhv_test_doorbell_irq(cmd.arg);
+		break;
+
 	default:
 		ret = -EINVAL;
 		break;
@@ -145,6 +149,19 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 	void __user *uarg = (void __user *)arg;
 
 	switch (cmd) {
+	case THHV_CREATE_DOORBELL:
+		return thhv_doorbell_create(file->private_data, uarg);
+	case THHV_DOORBELL_EVENTFD:
+		return thhv_doorbell_eventfd(file->private_data, uarg);
+	case THHV_REVOKE_CAP:
+		return thhv_doorbell_revoke(file->private_data, uarg);
+	case THHV_NOTIFY: {
+		struct thhv_notify args;
+
+		if (copy_from_user(&args, uarg, sizeof(args)))
+			return -EFAULT;
+		return themis_notify(args.handle, args.value);
+	}
 	case THHV_CREATE_PARTITION:
 		return thhv_partition_create(file, uarg);
 
@@ -195,6 +212,7 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 		}
 
 		mutex_lock(&attest_lock);
+		mutex_lock(&thhv_domcomm_lock);
 
 		if (is_signed) {
 			/* Signed path: enqueue AttestRequest on TX before
@@ -224,54 +242,38 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 			goto attest_unlock_err;
 		}
 
-		/* Stream all chunks off the RX ring.  We always drain (even
-		 * when total_size > buf_len), copying as much as fits into
-		 * the user buffer and discarding the rest.  Leaving chunks
-		 * on the ring would block the doorbell drain forever and
-		 * spam pr_warn_ratelimited.
-		 *
-		 * Capavisor's do_attest_self pushes the entire payload onto
-		 * the RX ring in a single hypercall (see enqueue_attest_payload),
-		 * so `wrote` already covers all bytes from `arg1` to total_size.
-		 * We just dequeue chunks until we've consumed `wrote` bytes.
-		 */
+		/* Drain one chunk per hypercall, including when the user's buffer
+		 * is too small. Continuations read the same monitor snapshot. */
 		{
-			u8 *scratch = NULL;
-			u64 enqueued_end = offset + wrote;
+			u8 *scratch = kvmalloc(PAGE_SIZE, GFP_KERNEL);
 
-			while (offset < enqueued_end) {
+			if (!scratch) {
+				ret = -ENOMEM;
+				goto attest_unlock_err;
+			}
+			while (offset < total_size) {
 				bool fits = offset < as->buf_len;
 				u32 room = fits
 					? (u32)min_t(u64,
 						     as->buf_len - offset,
-						     enqueued_end - offset)
+						     DOMCOMM_MAX_PAYLOAD)
 					: 0;
-				u32 rx_msg_type, rx_chunk_size;
+				u32 rx_chunk_size;
 
-				if (fits) {
-					if (!scratch) {
-						scratch = kvmalloc(PAGE_SIZE,
-								   GFP_KERNEL);
-						if (!scratch) {
-							ret = -ENOMEM;
-							goto attest_unlock_err;
-						}
-					}
-					room = (u32)min_t(u32, room, PAGE_SIZE);
-					ret = domcomm_rx_dequeue(
-						&thhv_domcomm.rx,
-						scratch, room,
-						&rx_msg_type, &rx_chunk_size);
-				} else {
-					ret = domcomm_rx_discard(
-						&thhv_domcomm.rx,
-						&rx_msg_type, &rx_chunk_size);
+				if (!wrote || wrote > DOMCOMM_MAX_PAYLOAD ||
+				    wrote > total_size - offset) {
+					kvfree(scratch);
+					ret = -EPROTO;
+					goto attest_unlock_err;
 				}
+				ret = domcomm_rx_dequeue_reply(
+					&thhv_domcomm.rx, scratch, PAGE_SIZE,
+					DOMCOMM_MSG_ATTEST, &rx_chunk_size);
 				if (ret) {
 					kvfree(scratch);
 					goto attest_unlock_err;
 				}
-				if (rx_msg_type != DOMCOMM_MSG_ATTEST) {
+				if (rx_chunk_size != wrote) {
 					kvfree(scratch);
 					ret = -EPROTO;
 					goto attest_unlock_err;
@@ -280,17 +282,30 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 					if (copy_to_user(
 						(void __user *)(unsigned long)
 							(as->buf_uaddr + offset),
-						scratch, rx_chunk_size)) {
+						scratch, min(room, rx_chunk_size))) {
 						kvfree(scratch);
 						ret = -EFAULT;
 						goto attest_unlock_err;
 					}
 				}
 				offset += rx_chunk_size;
+				if (offset < total_size) {
+					u64 next_total;
+
+					ret = themis_attest_self(is_signed ? 1 : 0,
+						offset, tx_sequence, &next_total, &wrote);
+					if (ret || next_total != total_size) {
+						kvfree(scratch);
+						if (!ret)
+							ret = -EPROTO;
+						goto attest_unlock_err;
+					}
+				}
 			}
 			kvfree(scratch);
 		}
 
+		mutex_unlock(&thhv_domcomm_lock);
 		mutex_unlock(&attest_lock);
 
 		as->report_size = total_size;
@@ -303,6 +318,7 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 		return ret;
 
 attest_unlock_err:
+		mutex_unlock(&thhv_domcomm_lock);
 		mutex_unlock(&attest_lock);
 		kfree(as);
 		return ret;
@@ -395,8 +411,10 @@ long thhv_debug_list_hpas(void __user *uarg)
 		if (args.domain_handle != 0 &&
 		    part->domain_handle != args.domain_handle)
 			continue;
-		thhv_collect_carved_runs(part, scratch, cap, &nr_total,
-					 &cur_hpa, &cur_pages);
+		ret = thhv_collect_carved_runs(part, scratch, cap, &nr_total,
+					      &cur_hpa, &cur_pages);
+		if (ret)
+			break;
 	}
 	/* Flush the trailing run after iterating all partitions. */
 	if (cur_pages) {
@@ -408,7 +426,7 @@ long thhv_debug_list_hpas(void __user *uarg)
 	}
 	spin_unlock(&thhv_partitions_lock);
 
-	if (cap && nr_total) {
+	if (!ret && cap && nr_total) {
 		u32 to_copy = min(nr_total, cap);
 
 		if (copy_to_user(user_entries, scratch,
@@ -428,15 +446,15 @@ long thhv_debug_list_hpas(void __user *uarg)
 
 /* ── THHV_DEBUG_REVOKE_ALL implementation ─────────────────────────────────
  *
- * Debug entry point: fire REVOKE_DOMAIN on every child partition
+ * Debug entry point: fire REVOKE(handle, 0) on every child partition
  * currently registered.  Snapshots the domain handles under
  * partitions_lock (a spinlock; can't hold across a hypercall), drops the
- * lock, then issues themis_revoke_domain on each snapshot.  A partition
+ * lock, then issues themis_revoke(handle, 0) on each snapshot.  A partition
  * that was destroyed between snapshot and revoke simply produces an
  * error from the capavisor, which we log and ignore.
  *
  * Intended use: pin this caller to a specific dom0 core with
- * `taskset -c N ...` so REVOKE_DOMAIN fires from a different physical
+ * `taskset -c N ...` so REVOKE fires from a different physical
  * core than the CHV vCPU thread that has switched into the child,
  * exercising the cross-core revoke swap path.
  */
@@ -473,9 +491,9 @@ long thhv_debug_revoke_all(void)
 	spin_unlock(&thhv_partitions_lock);
 
 	for (i = 0; i < nr; i++) {
-		pr_info("thhv: DEBUG_REVOKE_ALL → revoke_domain(0x%llx)\n",
+		pr_info("thhv: DEBUG_REVOKE_ALL → revoke(0x%llx, 0)\n",
 			handles[i]);
-		ret = themis_revoke_domain(handles[i]);
+		ret = themis_revoke(handles[i], 0);
 		if (ret)
 			pr_warn("thhv: DEBUG_REVOKE_ALL: revoke 0x%llx failed (%d)\n",
 				handles[i], ret);
@@ -488,13 +506,22 @@ long thhv_debug_revoke_all(void)
 
 static int thhv_dev_open(struct inode *inode, struct file *file)
 {
-	/* No per-device state needed at the device fd level. */
+	struct thhv_device *device = kzalloc(sizeof(*device), GFP_KERNEL);
+
+	if (!device)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&device->doorbells);
+	file->private_data = device;
 	return 0;
 }
 
 static int thhv_dev_release(struct inode *inode, struct file *file)
 {
-	return 0;
+	struct thhv_device *device = file->private_data;
+	int ret = thhv_doorbell_release(device);
+
+	kfree(device);
+	return ret;
 }
 
 /* ── /dev/thhv mmap: map a host-physical page range into userspace ──────────
@@ -507,19 +534,36 @@ static int thhv_dev_release(struct inode *inode, struct file *file)
  *
  * `offset` parameter to mmap(2) is interpreted as the HPA (must be page-
  * aligned; mmap converts to vm_pgoff for us).  CAP_SYS_ADMIN gated: this
- * is a debug-only interface that lets root map arbitrary physical memory.
+ * is a debug-only MAP_SHARED interface. Each HPA is translated back to
+ * this Linux instance's GPA; absent mappings are rejected.
  */
 static int thhv_dev_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long offset;
+	u64 hpa;
 
 	(void)file;
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	if (!(vma->vm_flags & VM_SHARED) ||
+	    vma->vm_pgoff > (U64_MAX >> PAGE_SHIFT))
+		return -EINVAL;
+	hpa = (u64)vma->vm_pgoff << PAGE_SHIFT;
+	if (size > U64_MAX - hpa)
+		return -EINVAL;
+	for (offset = 0; offset < size; offset += PAGE_SIZE) {
+		u64 gpa;
+		int ret = thhv_hpa_to_gpa(hpa + offset, &gpa);
 
-	if (remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
-			    size, vma->vm_page_prot))
-		return -EAGAIN;
+		if (ret)
+			return ret;
+		ret = remap_pfn_range(vma, vma->vm_start + offset,
+				      gpa >> PAGE_SHIFT, PAGE_SIZE,
+				      vma->vm_page_prot);
+		if (ret)
+			return ret;
+	}
 	return 0;
 }
 
@@ -554,10 +598,19 @@ static int __init thhv_init(void)
 		return ret;
 	}
 
+	ret = thhv_doorbell_irq_init();
+	if (ret) {
+		pr_err("thhv: doorbell IRQ init failed (%d)\n", ret);
+		thhv_pa_map_cleanup();
+		return ret;
+	}
+
 	ret = misc_register(&thhv_misc);
 	if (ret) {
 		pr_err("thhv: failed to register /dev/%s (err %d)\n",
 		       THHV_DEV_NAME, ret);
+		thhv_doorbell_irq_cleanup();
+		thhv_pa_map_cleanup();
 		return ret;
 	}
 
@@ -569,6 +622,7 @@ static int __init thhv_init(void)
 static void __exit thhv_exit(void)
 {
 	misc_deregister(&thhv_misc);
+	thhv_doorbell_irq_cleanup();
 	thhv_shmem_cleanup();
 	thhv_pa_map_cleanup();
 	pr_info("thhv: /dev/%s unregistered\n", THHV_DEV_NAME);

@@ -56,7 +56,6 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     let mut mem_caps: Vec<capability_engine::CapabilityRef<MemoryRegion>> = Vec::new();
     let meta_caps;
     let comm_root_handle: u64;
-    let self_domain_cap_handle: u64;
     {
         let mut dom = root_domain.write();
 
@@ -167,18 +166,6 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         );
         // Keep the Arc alive past this block so CARVE can find it.
         mem_caps.push(comm_root);
-        sub += 1;
-
-        // ── Self-referencing domain capability ────────────────────────────── //
-        //
-        // dom0 needs a domain capability pointing to itself so that
-        // register_comm() can resolve the child_domain_handle.  For dom0's
-        // DomainComm, target_domain_id == owner_id (self-referential).
-        self_domain_cap_handle = sub;
-        dom.data
-            .add_domain_capability(self_domain_cap_handle, Arc::downgrade(&root_domain));
-        serial_println!("  self domain cap #{}: dom0 → dom0", sub);
-        // sub += 1; // not needed — last handle allocation in this block
     }
 
     // ── Build EPT via UpdateBatch ──────────────────────────────────────── //
@@ -259,7 +246,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     // The COMM root capability is the tree anchor.  We carve a child covering
     // the entire region so it satisfies register_comm's "must be a Carve"
     // precondition.  Then register_comm binds it as dom0's DomainComm page
-    // (target_domain == self, vp_id = 0 by convention for domain-level COMM).
+    // using the same SELF/domain-level sentinels available to every domain.
     let _comm_child_handle = {
         use capability_engine::Access;
         let cr = &info.partition.comm_region;
@@ -282,8 +269,8 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             &platform,
             &root_domain,
             child_handle,
-            self_domain_cap_handle,
-            0, // vp_id 0 = domain-level COMM
+            capability_engine::SELF_CAPABILITY,
+            u32::MAX,
         )
         .expect("P2c: COMM register failed");
 

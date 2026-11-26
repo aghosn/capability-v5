@@ -7,6 +7,789 @@
 
 ---
 
+## 0. Direct Paravirtual Interface Plan (2026-11-24)
+
+**Current implementation update: capability doorbells supersede the
+address-matching recipes below.** Each configured PV request queue gets a
+Sync endpoint owned initially by the parent and transferred to the child
+through generic SEND/ACCEPT. Descriptor ABI 2 names recipient/port, not a
+fake GPA or guessed handle. The guest resolves its held handle through
+self-attestation and calls NOTIFY(handle, value), with no failure-to-yield
+fallback. Sync reuses interrupt unwind to the blocked recipient VP.
+Driver event 8 carries port/value; eventfd subscriptions do not own authority.
+Ordinary MMIO/PIO matching now lives in CHV userspace. REGISTER_DOORBELL,
+RING_DOORBELL, driver IOEVENTFD, event 7 and synthetic doorbell exits are
+removed. Older sections below retain design history, not instructions to
+restore these paths. See [current engine semantics](../capability-engine/semantics.md#doorbell-capabilities)
+and [wire format](../domain-comm.md#domcomm_msg_attest--binary-attestation-report).
+
+**Status: design reviewed; first executable channel working (2026-11-24).**
+The user selected planning the direct solution rather than a temporary
+MMIO/register-transfer interface. Existing standard guests must continue to
+work. This section supersedes the older PCI-first bootstrap and EPT-doorbell
+assumptions below for the new confidential/PV deployment profile; the older
+sections remain as historical context for existing ivshmem support.
+
+### 0.1 Goal and trust boundary
+
+Build a Themis-native parent-child service interface:
+
+```
+declarative deployment configuration
+  -> capability-backed regions + notification bindings before seal
+  -> early guest discovery of an immutable deployment descriptor
+  -> private parent-child shared request/reply memory
+  -> doorbell / CPU return
+  -> parent service implementation (initially CHV)
+```
+
+The capavisor enforces capability authority and scheduling; it does not parse
+virtio or device-service payloads. Parent userspace uses thhv for all monitor
+operations. Nothing depends on the parent's domain ID being zero.
+
+The parent is an untrusted I/O provider. It sees only deliberately shared
+buffers and policy-permitted metadata, not private page tables, instructions,
+or a general register dump. No instruction decoding is needed on either side.
+Attestation proves deployment identity, resources and permissions, not that
+the provider will answer honestly or continue scheduling the guest.
+
+### 0.2 Reuse what exists
+
+- Memory: derive the buffer from exclusively held parent backing, ALIAS it,
+  then SEND_AT the alias to the unsealed child. Retain the parent mapping.
+  Existing `Capability::alias`/`send_at` and thhv wrappers are sufficient;
+  no new shared-memory capability type is proposed.
+- Authority transfer: existing domain/channel capabilities remain the
+  authority for transferring resources. A transport "channel" below is a
+  memory/notification binding, not a replacement for GET_CHAN/SEND_CHAN.
+- Signaling: reuse REGISTER_DOORBELL/RING_DOORBELL and existing eventfds.
+  The current RING_DOORBELL implementation already returns execution to
+  the parent. Do not ring it and then unconditionally SWITCH-return again.
+- Scheduling: retain synchronous parent-child CPU donation. SWITCH with
+  target handle zero already expresses voluntary return in the engine.
+- Discovery: reuse the Themis CPUID discovery mechanism and early
+  `themis_platform_init()`, not PCI enumeration for the bootstrap channel.
+- Services: reuse CHV's device implementations and Linux's virtio drivers,
+  not Hyper-V's wire ABI or a new network/block protocol.
+
+DomainComm remains domain-to-capavisor; VpCommPage remains parent-to-capavisor
+register transfer. Neither is the parent-child data plane. Existing ivshmem
+can continue using the same capability primitives, but the bootstrap channel
+must not depend on first booting a PCI device.
+
+### 0.3 Declarative resources
+
+Extend the existing `comm` configuration, preserving `comm.ivshmem`.
+Illustrative new fields, not accepted by today's parser:
+
+```json
+{
+  "comm": {
+    "regions": [
+      {
+        "id": "pv-control",
+        "kind": "alias",
+        "peer": "parent",
+        "gpa": "auto",
+        "size_per_vp": "0x1000",
+        "rights": "RW"
+      },
+      {
+        "id": "pv-io",
+        "kind": "alias",
+        "peer": "parent",
+        "gpa": "auto",
+        "size": "0x100000",
+        "rights": "RW"
+      }
+    ],
+    "channels": [
+      {
+        "id": "parent-services",
+        "protocol": "themis-pv/1",
+        "region": "pv-control",
+        "io_region": "pv-io",
+        "notification": "doorbell",
+        "scheduling": "sync",
+        "services": ["platform", "virtio"]
+      }
+    ]
+  }
+}
+```
+
+Keep stock CHV configuration as the source for disks, NICs, kernel, initrd
+and command line. The resolved descriptor binds those device IDs to services;
+do not duplicate their backend configuration in this section.
+
+`auto` is placement, not an unspecified policy: resolve all addresses,
+region sizes and device bindings before seal, record the resolved deployment,
+and validate it against the declaration. Reject overlaps, overflow, ambiguous
+IDs, executable shared buffers, unsupported protocol versions, and missing
+or incompatible bindings before handing away private RAM. Reject conflicts
+introduced by CLI/config merging rather than silently overriding them.
+
+One logical region may span several physical capabilities; neither the JSON
+nor the protocol assumes physically contiguous backing. Validate exact GPA
+coverage and rights over all segments and vTOM aliases.
+
+Current code distinction: `general.shared_regions` is parsed, but runtime
+confidential splitting still uses `ThemisVmState::SHARED_REGIONS`;
+`comm.ivshmem` is actually reconciled into device configuration. Do not mistake
+either for an already implemented generic resource manifest.
+
+### 0.4 Stable control protocol and CPU handoff
+
+Start with one fixed request/reply slot per VP, not a general message broker.
+Specify version, channel/session generation, sequence, service/device ID,
+operation, bounded payload length, completion status and result. Payload
+references are checked offsets within named shared regions, never private
+guest pointers or an arbitrary physical-memory service.
+
+```
+guest publishes request with release ordering
+  -> RING_DOORBELL (current sync implementation also returns to parent)
+  -> thhv returns notification to CHV
+  -> CHV snapshots and validates request, dispatches the named service
+  -> CHV publishes correlated completion with release ordering
+  -> parent SWITCHes back to child
+  -> guest acquires, copies and validates reply against private request state
+```
+
+Define compiler barriers and hypercall clobbers as well as CPU memory
+ordering. In particular, do not blindly reuse `raw_vmcall`'s current `nomem`
+annotation for a shared-memory synchronization boundary. Prevent migration
+or interrupt reentry from reusing a VP's occupied slot.
+
+Shared sequence/state is authoritative; a doorbell is only a wakeup hint.
+Handle queue-full, duplicate/stale completion, reset, invalid lengths,
+unsupported operations, and revoke during an outstanding request explicitly.
+Do not silently drop notifications or fabricate successful reads.
+Quiesce workers and revoke mappings before unpinning/reusing backing.
+
+For an explicit SWITCH(0) return, define thhv-visible success/return metadata
+and pending-work handling. Today's `do_switch` does not build the intercept
+message that `thhv_run_vp` normally expects. Also distinguish voluntary
+return from cold VP initialization for register permissions:
+`last_exit_reason=None` currently selects VECTOR_AVAILABLE policy.
+Use existing mediated return/exit-policy mechanisms; do not make yielding
+grant the parent bootstrap-level register access.
+
+Notification-only operations can later batch requests, and independent-core
+delivery can be added later. Neither is required for synchronous v1.
+
+### 0.5 Attestable deployment, not trusted JSON
+
+The JSON is the verifier's expected declaration, not evidence supplied by a
+trusted CHV. The verifier must compare it with signed, engine-derived facts.
+Names and paths do not grant authority or prove who can map a region.
+
+Use the existing launch sequence: configure, seal, then attest the sealed
+domain through the existing API. Extend its evidence and measurement
+implementation; do not introduce a separate launch-finalization operation.
+
+Before calling a deployment attestable, provide versioned evidence for:
+
+- Applied monitor-enforced domain policy, including API permissions,
+  exit/interrupt register masks and CPUID/MSR interception controls, not
+  just the requested JSON. CHV-owned CPUID answers remain provider claims,
+  not monitor-enforced facts; this plan does not move CPUID ownership.
+- Actual memory mappings, rights, attributes, derivation/sharing information
+  and endpoint relationships needed to check the declared private/shared
+  boundary. Correlate both endpoints' backing, not merely equal GPAs.
+- Measurements of immutable boot artifacts and the resolved bootstrap
+  descriptor. Hash neither live request queues nor changing I/O buffers.
+- A defined launch boundary after initial VP register setup and before first
+  entry, binding required entry state, image placement and boot inputs.
+  Sealing alone is not proof of the initial execution state.
+- Explicit identity/version binding for the descriptor, protocol and service
+  inventory. CPUID is a discovery hint checked against that evidence.
+
+Use an exclusively transferred, guest-read-only descriptor, separate from
+mutable shared memory. Make a versioned report extension without breaking
+the existing DomainComm PA-map/bootstrap format.
+
+Actual gaps found while planning:
+
+- `StructuredAttestation` currently carries cap/address-map entries, VP count
+  and API flags, but not full policy, memory content hashes or the sharing
+  relationships required above. The existing signature covers its full
+  serialized base; signing is not the missing part.
+- HASH-on-send calls `Platform::measure_region`; its default is zero and
+  `ThemisPlatform` currently has no override. Implement real measurement and
+  reject unsupported measurement rather than accepting a zero placeholder.
+- Establish correct handoff ordering before relying on content hashes.
+  The current send helper measures while preparing the engine operation,
+  before its returned mapping updates are applied. A trustworthy measurement
+  must not race a sender VP that still has write access.
+
+Keep report construction within sanctioned engine interfaces and its
+snapshot/update discipline. Any missing reporting or binding interface is
+an explicit design item, not an excuse to inspect trees from CHV or ad-hoc
+capavisor code. Do not assume seal freezes all memory-sharing state:
+policy mutation is rejected after seal, while permitted memory operations
+and revocation can still change resources. Define report snapshot/lifetime
+semantics and the guest's allowed dynamic-sharing envelope.
+
+This work does not by itself establish integrity of an untrusted disk or
+truthfulness of device responses. Workload identity must include its trusted
+boot chain and any in-guest verification of subsequently loaded code.
+
+### 0.6 Linux and device integration
+
+Proposed direct device path: a built-in Themis service client plus a
+`virtio-themis` transport implementing `virtio_config_ops`, paired with a CHV
+transport using `VirtioDevice`/`ActivationContext`. Keep virtio-net/blk and
+the backend workers; translate feature/config/status/queue setup directly,
+not through simulated PCI BAR loads/stores.
+Keep control requests bounded and data I/O asynchronous through virtqueues.
+Queue completions use explicitly declared, policy-authorized interrupts;
+cross-core delivery continues through `inject_via_pid`, not a new bypass.
+
+Give that transport an explicit DMA/shared-buffer policy. Use the declared
+I/O arena for coherent rings/descriptors and bounce streaming private
+buffers as required. CHV workers receive a memory view restricted to those
+shared ranges; private guest RAM is not a fallback. Merely sharing the
+control page cannot make virtio data I/O work.
+
+Early platform support is a separate required slice: the reproduced first
+failure is I/O APIC access before virtio probing. Keep the current APIC mode,
+timer and interrupt capability semantics for this work. Use Themis-owned
+LAPIC callbacks and a narrow I/O APIC backend with semantic register/EOI
+operations over the same channel, rather than a global readl/writel
+interceptor. Existing I/O APIC reads have a hook; writes, EOI and the dummy
+sync read need explicit coverage. Add only the missing hooks needed to
+reach built-in Themis support, preserving native behavior elsewhere.
+
+The PV device profile must not advertise PCI/ECAM paths that then require
+private instruction emulation. Specify its PCI/ACPI inventory and any
+remaining platform accesses explicitly. Removing legacy platform devices
+entirely is not a prerequisite for the control channel; a broader no-IOAPIC
+platform can be a later choice.
+
+Unexpected EPT faults must not export private instruction bytes or silently
+fall back to the current emulator. Register masks alone do not control the
+unconditional instruction-byte copy in `forward_child_exit`. Remove that
+unauthorized export as part of the confidential profile's acceptance work,
+while preserving legitimate standard-guest behavior.
+
+### 0.7 Milestones and acceptance
+
+1. **Contract**: agree schema, resolved descriptor, wire ownership, handoff
+   permissions, required evidence and guest platform inventory. No runtime
+   code until that boundary is agreed.
+2. **Declarative launch**: create declared buffers via existing capabilities,
+   publish early discovery/descriptor, configure notification and policy,
+   validate and seal. Include fragmented backing and launch-failure cleanup.
+3. **One real round trip**: small Eunomia/libthemis guest, one VP then two,
+   executes correlated requests over the final channel with no register
+   payload. Test both notification and voluntary return semantics.
+4. **Evidence**: implement the missing measurement/reporting contract and a
+   verifier that rejects a declaration/actual-state mismatch. Channel plumbing
+   may be developed alongside this, but does not count as an attestable
+   deployment until it passes.
+5. **Linux integration**: early I/O APIC/LAPIC support, Themis virtio transport,
+   constrained DMA, block then network. No per-net/block-driver edits planned.
+6. **Acceptance**: two-CPU confidential Linux, disk, authenticated SSH, clean
+   shutdown/relaunch, denied private access, and unchanged standard guest.
+
+Focused checks must cover stale/duplicate replies, invalid service/offset,
+overflow and missing notification, reply mutation, concurrent VPs, revoke
+during a read, unintended register/code disclosure, mismatched declared
+sharing/policy/measurement, and parent access after private-memory teardown.
+Batch instrumentation and boot assertions rather than iterating one log
+statement per reboot.
+
+Source anchors: `capa-engine/src/domain_api.rs:238,364,1477,1880,3005,3887`;
+`capa-engine/src/attest.rs:34-82`; `capa-engine/src/platform.rs:483`;
+`themis/capavisor/src/hypercall/attest.rs:49-185`;
+`themis/capavisor/src/arch/x86_64/hypercall/switch.rs:55-210,365-477`;
+`themis/capavisor/src/arch/x86_64/hypercall/doorbell.rs:34-107`;
+`cloud-hypervisor/hypervisor/src/themis/config.rs:316-349,749-791`;
+`cloud-hypervisor/hypervisor/src/themis/vm_state.rs:95-191`;
+`cloud-hypervisor/vmm/src/config.rs:2862-2932`;
+`cloud-hypervisor/virtio-devices/src/device.rs:56-108`;
+`themis/crates/libthemis/src/lib.rs:32-73`;
+`eunomia/workloads/coco/src/main.rs`;
+guest Linux `include/linux/virtio_config.h:34-135` and
+`arch/x86/kernel/apic/io_apic.c:245-285,390-400`.
+
+### 0.8 Implementation contract and review gate
+
+The user authorized fleshing out this contract, subagent design review,
+implementation/testing, then independent subagent implementation review and
+testing. Implement in the milestone order above, preserving a working
+standard profile between milestones. Do not equate transport completion
+with confidential Linux boot or verified deployment attestation.
+
+**Launch configuration.** Keep the example's field names. V1 supports only
+parent-peer ALIAS regions with RW (never executable), `themis-pv/1`, doorbell
+notification and synchronous scheduling. Require exactly one of `size` and
+`size_per_vp`; control regions require `size_per_vp: 4096`, while I/O regions
+require fixed `size`. This keeps configuration validation independent of the
+eventual VP count. Control regions use one page per created VP.
+Region/channel IDs are unique, nonempty ASCII identifiers of at most 31 bytes.
+Bound descriptors to 16 regions and 8 channels. Each channel references
+distinct control and I/O regions, with exclusive control-slot ownership.
+Reject missing, multiply owned or unused regions, unknown service names,
+and any unsupported mode rather than accepting an unapplied option.
+
+Resolve `auto` by page-aligned first fit at or above 8 GiB, considering every
+pending guest-memory mapping, previously resolved region and descriptor.
+All ranges must fit below the vTOM bit (and the guest physical-address limit),
+be nonempty/page-aligned and have checked ends. Explicit addresses use the
+same checks. Prevalidate the complete layout before the first destructive
+memory handoff. Allocate independent parent userspace backing, zero it,
+and register through THHV_SET_GUEST_MEMORY with ALIAS and RW rights.
+Keep backing alive until domain teardown; never dereference handed-off
+private descriptor memory afterward.
+For the first executable gate, bound each I/O arena to 1 MiB and total PV
+backing to 8 MiB (at most 2048 physical page segments). Retain the normal
+driver segment preflight and META provisioning. Larger arenas require an
+explicit resource-budget change, not an unchecked allocation. thhv performs
+the ALIAS/SEND_AT operations internally for independent userspace backing.
+The shared-DMA integration explicitly raises those ceilings to 24 MiB per
+I/O arena and 32 MiB total backing; the PV/confidential Linux policies request
+24 MiB after the original 1 MiB pool exhausted during rootfs boot.
+
+**Discovery.** Reserve CPUID leaf `0x40000005`, subleaf zero:
+EAX/EBX are descriptor GPA low/high, ECX is its byte size (4096), EDX is
+protocol version (1). Absent channels return zeros. Reject conflicting
+user/runtime overrides rather than silently replacing them. The discovery
+leaf is a locator, not evidence. The descriptor is a separate CARVE,
+read-only in the child, containing magic/version/length, fresh 128-bit launch
+generation, VP count, region IDs/ranges/rights and channel bindings.
+Use fixed little-endian records, zero reserved fields and bounded counts;
+guest parsing must not cast unvalidated bytes into a trusted reference.
+Signed binding to measured state belongs to milestone 4.
+Subleaf 1 is Native, with EAX = the calling VP's actual index, EBX/ECX = 0,
+EDX = protocol version 1. Install that exact Native policy even when the
+domain's default is Trap: excluding the locator leaf from broad Native
+ranges also excludes its other subleaves. A guest must not infer its slot
+from domain-wide emulated CPUID APIC IDs or Linux logical CPU numbering.
+Each channel also records an unmapped doorbell-key page and an exact
+doorbell value. VP n uses `doorbell_base + n * 8`, registered as an 8-byte
+datamatch doorbell through THHV_IOEVENTFD before seal (not ANY_VALUE).
+Prevalidate the combined PV and legacy-device registrations against the
+shared ABI's 128-doorbell per-domain budget before registering any PV key.
+Reserve these keys against all mappings; they do not themselves map memory.
+Validate descriptor/control pages before mapping them in Eunomia's explicit
+above-4-GiB page-table path; do not map the whole I/O arena for a control test.
+The first small-guest test uses normal GPAs; the confidential Linux gate
+additionally requires consistent vTOM aliases for declared shared buffers.
+
+**One control page per channel/VP.** Page offsets 0 and 128 hold separate
+128-byte request and completion records. Each record starts with an aligned
+64-bit publication sequence followed by 15 aligned 64-bit words. Both sides
+access shared words atomically; there are no ordinary Rust references to
+concurrently attacker-writable payloads.
+
+Payload words encode generation[2], `(channel, VP)`, `(service, opcode)`,
+device ID plus request-reserved/completion-status, six argument/result
+words and four zero reserved words. IDs/opcodes/status occupy explicit
+32-bit halves, not compiler-dependent enums or pointers.
+Sequence starts at one, increases without wrapping, and is private state
+at both endpoints. Publish payload then sequence with release ordering;
+acquire sequence, copy to private storage, recheck sequence, validate, use
+only that snapshot. Match completion to the outstanding sequence/session/
+service/device/operation. Never overwrite an occupied request slot.
+
+V1 control service includes negotiation/liveness. Platform and virtio use
+separate service IDs. Unsupported operations complete with an explicit
+unsupported status; malformed identities, bounds or framing fail the
+channel, never return fabricated read data. Data references are validated
+offset/length pairs into the channel's declared I/O arena.
+
+**Early platform service.** Service 1, device 0 identifies the single
+I/O APIC at `0xfec00000`. Opcodes 0/1/2/3 are register read, register write,
+direct EOI and synchronization. Argument 0 is the register selector or EOI
+vector; argument 1 is the 32-bit write value; all other arguments are zero.
+Reads permit selectors 0--2 and 0x10--0x3f. Writes permit selector 0 and
+0x10--0x3f. EOI vectors fit eight bits; synchronization takes no arguments.
+Reads return one 32-bit value; other results are zero. CHV serializes each
+selector/data transaction across VPs and uses the existing device bus,
+never private-memory access or instruction decoding. Its registered
+I/O APIC aperture includes the 32-bit EOI register at offset 0x40.
+The Linux backend validates/copies the descriptor, maps only the selected
+channel's per-VP control pages using permanent fixmaps and the appropriate
+vTOM aliases, and installs narrow read/write/EOI/sync callbacks. Native
+callbacks remain unchanged without a declared platform channel. Missing,
+invalid or failed synchronous completions are fatal, not an MMIO fallback.
+Virtio service and LAPIC integration are not implemented by this slice.
+
+**Synchronous servicing.** Before resuming a VP, CHV checks its declared
+slots for outstanding work, including after non-doorbell exits; eventfd
+delivery is not the source of truth. Dispatch only a local request copy and
+publish a correlated completion. Repeated notifications do not re-execute a
+completed operation.
+
+Successful RING_DOORBELL returns SUCCESS to the guest on resumption and
+returns the CPU exactly once. Queue-full is reported, not dropped silently.
+A caller may fall back to voluntary SWITCH(0) only when ringing failed.
+Voluntary return gets a distinct synthetic exit, a valid intercept message,
+and normal engine return validation; an invalid/root return must report an
+error, not panic. Both PV synthetic exits have empty parent read/write
+register masks, separate from cold-boot initialization. No payload resides
+in the intercept message. Preserve existing legacy doorbell handling.
+After a successful return, an absent completion is an explicit no-completion
+error, never success or an unbounded spin. Server slot scans run on the
+owning VP thread immediately before each RUN_VP, independent of eventfds.
+Quiesce all service users before domain-fd close and keep shared mappings
+alive through that close. The descriptor's post-send exclusion and child
+read-only EPT rights require negative guest/parent access tests; teardown
+must clean private contents before any permitted parent reuse.
+
+**First executable acceptance boundary.** A small Eunomia guest discovers
+the descriptor and completes correlated requests through CHV and thhv using
+real ALIAS/SEND_AT mappings, including successive requests and voluntary
+return. Hosted tests cover malformed descriptors/requests, sequence and
+generation mismatch, overflow/overlap, duplicate notifications, unavailable
+completion and independent VP slots. Build ABI/libthemis, CHV, driver and
+capavisor; run the small guest before claiming the channel works.
+
+**Later gates remain mandatory.** Linux needs early platform/APIC coverage,
+device discovery, virtio setup plus shared DMA and authorized completion
+interrupts. Attestable deployment additionally needs real measurements,
+correct measurement-handoff ordering and applied-state evidence through the
+existing post-seal attestation API, not just protocol metadata.
+
+Design review completed with conditional approval: B1--B7 cover doorbell
+return status, reason-tagged voluntary return, compiler ordering, registered
+doorbell discovery, explicit R/RW mapping rights, bounded high-GPA
+allocation/teardown/vTOM treatment, and completion/liveness checks. They are
+mandatory implementation/acceptance items above, not deferred suggestions.
+
+**Executed first-gate checks (2026-11-24).** ABI unit/doc tests and CHV
+configuration/policy/mmap-backed two-VP slot tests pass. Full release
+capavisor/driver/CHV/Eunomia build and image packaging pass. A live Eunomia
+guest completes eight successive requests, alternating doorbell and
+voluntary return, and teardown/relaunch passes. A two-created-VP launch also
+passes, but this workload exercises only the bootstrap CPU; actual concurrent
+guest-VP requests remain unverified. Standard Linux regression confirms
+kernel `6.19.14+`, two online CPUs, root disk, network/SSH and clean shutdown.
+Independent implementation review reran host tests and the guest build;
+its doorbell-budget finding is addressed by launch prevalidation.
+Descriptor/parent permission-denial tests, confidential Linux, constrained
+DMA/virtio, private-instruction-export prevention and real attestation remain
+open gates, not inferred successes. Existing CHV Clippy baseline remains
+failing with 50 pre-existing findings; new-module findings were fixed.
+
+**Executed Linux I/O APIC slice (2026-11-24).** The built-in Linux client and
+CHV semantic platform dispatcher negotiate the declared channel and
+initialize the I/O APIC in a confidential guest. Native VP identity,
+confidential shared aliases and the full I/O APIC EOI bus aperture are
+implemented. Independent review/tests pass: 41 CHV tests, one real I/O APIC
+bus/EOI test and seven mocked notification cases. ABI has 12 unit plus two
+doc tests and passes strict Clippy; Linux checkpatch is clean. Full kernel,
+release stack and packaged-image builds pass. Standard Linux on the final
+build passes two CPUs, disk, network/password SSH and clean shutdown.
+
+An exploratory confidential run reached two CPUs and a later private
+page-table fault, but still used legacy LAPIC instruction decoding. That is
+not confidential acceptance. Final CHV rejects confidential EPT/MMIO
+exits before either legacy decoder. Its final live run initializes the
+channel and I/O APIC, then explicitly stops at LAPIC GPA `0xfee000f0`,
+without reading private page tables or crashing the parent. Orderly CHV
+exit does not mean the guest booted successfully. The next platform slice
+must provide semantic per-VP LAPIC access; do not bypass the guard.
+Capavisor private-instruction export, direct virtio/shared DMA, actual
+concurrent guest-VP requests, negative-access tests and existing-API
+post-seal attestation remain open. The Linux base-signature correction also
+enabled existing virtio fast notifications; these now retry bounded busy
+failures and report errors rather than silently dropping queue kicks.
+
+### 0.9 Capability-boundary remediation proposal (2026-11-24)
+
+**Status: approved; scoped VP policy, initial hardware-boundary fixes and
+engine-owned VP hardware handoff implemented and independently reviewed/tested.
+Notification transactions, backing and post-seal evidence remain in progress.**
+The audit above exposed inherited engine/platform boundary problems. Fix those
+boundaries before adding more Linux device services. This proposal supersedes
+the first-gate shortcuts where explicitly stated, not the existing
+configure -> seal -> attest sequence.
+
+**Policy scope.** Introduce a typed domain-default/VP policy target in the
+engine, with explicitly inheriting VP overrides. CPU identity/CPUID, MSR
+interposition, exit routing/register disclosure and CPU-local interrupt
+visibility/register access are execution policy. Memory/device ownership,
+monitor API authority and the domain's physical-core envelope remain domain
+authority. VP overrides cannot enlarge that envelope or grant resources.
+Keep interrupt ownership/injection authority separate from delivery visibility.
+Validate scope, VP existence, caller rights and seal status inside the engine.
+Domain-default updates must not overwrite explicit VP overrides; an absent VP
+override must continue inheriting subsequent domain-default updates.
+An override replaces an explicitly selected execution-policy category, not
+unrelated categories. Policy configuration remains pre-seal only. Create the
+VP before configuring its overrides; clearing an override restores inheritance.
+
+Mutable emulated MSR values are VP runtime state, not edits to sealed policy.
+Keep initial values in policy/evidence and resolve reads/writes against the
+actual running VP. CHV must submit every VP's CPUID table, including topology
+and APIC identity, rather than copying the first table into a domain-wide
+answer. The existing Native current-VP discovery leaf remains an explicitly
+authorized discovery primitive, not a substitute for correct CPUID topology.
+Use scoped engine updates and per-VP hardware interception state where policies
+can differ. Extend the ABI/driver with a typed scoped operation, preserving
+existing domain-default calls and full-width capability handles.
+
+**Physical I/O.** Remove the COM1-only interception workaround. Derive each
+VP's hardware I/O interception from its effective engine policy at creation,
+policy update and seal. A forwarded access must actually trap; unsupported
+native device access must be rejected explicitly rather than quietly enabled.
+Do not introduce a replacement port whitelist in monitor code. Keep EOI-exit
+bitmaps zero.
+
+**Exit disclosure and denied accesses.** Remove the monitor's unconditional
+private instruction/page-table read and instruction-byte export. Standard CHV
+may fetch instructions only through its own capability-backed memory view
+and policy-authorized register reads. Confidential CHV retains the no-decoder
+guard and semantic shared requests. Mandatory exit metadata and register masks
+must come from the effective VP policy; synthetic returns grant no general
+register access. A locally handled denied EPT access must produce an explicit
+architectural failure, without advancing RIP or fabricating a completed load,
+regardless of guest CPL.
+Use #GP(0) for a locally denied EPT access at every CPL, preserving the existing
+recoverable user-mode denial semantics. Do not unconditionally forward faults
+to the parent when the engine policy selected local handling: that would add
+disclosure outside the configured exit policy.
+
+**Notifications.** Move binding identity, match rules, endpoint authority,
+budget and inventory into the engine. Registration requires authorized child
+access and an unsealed child; seal freezes new bindings and retargeting.
+Revocation/removal may reduce authority afterward without reusing identities.
+Keep mutable Linux eventfd subscriptions separate from the sealed authorization.
+Both explicit rings and any retained legacy trigger must use engine-owned
+authorization, not a platform lookup that merely happens under an engine lock.
+
+For synchronous delivery, validate the running source VP, binding, destination
+and return-chain state before any externally visible notification. Delivery
+and the single CPU return form one mediated transaction. Queue-full or invalid
+return must leave both the queue and VP scheduling state unchanged. Keep queue
+reservation/commit and update ordering explicit; no fallible post-enqueue
+validation, no nested execute(), and no callback that independently decides
+authority. Serialize removal/revoke with delivery and test those races.
+Removal takes the existing exclusive operation lock; rings use the shared
+operation lock and the destination queue's producer lock. Split return handling
+into validation and an infallible commit, with the validated source/return
+state protected until commit. Check queue capacity under the producer lock
+after validation. A full queue returns ERR_BUSY without committing a return or
+publishing an entry. Previously queued notifications may drain after removal;
+never reuse binding IDs, and let unsubscribed consumers ignore stale entries.
+Keep existing legacy notification triggers only by routing them through this
+same engine-owned authorization, not by maintaining a second implementation.
+
+Follow-up implementation review found that a shared operation lock alone
+cannot protect the hardware handoff: a source VP marked Available can be
+claimed on another core before its hardware slot is released. Keep the source
+Running and its parent Locked until the hardware handoff releases ownership,
+then publish the scheduling transition. The engine should invoke Platform
+save/handoff callbacks as needed to own this ordering; do not introduce a
+Returning state or globally serialize returns merely to compensate for early
+publication. Capability validation still precedes every hardware change.
+
+The handoff foundation is implemented via `Platform::handoff_vp`: the engine
+selects call/return/interrupt work, explicit endpoints and disclosure masks,
+then invokes hardware completion under its shared operation lock. Ordinary
+returns preserve Running/Locked through hardware completion; interrupt
+unwinds preserve the complete active chain until then. Forward calls reserve
+the target Running and source Locked, and complete hardware before releasing
+the operation lock. The callback never resumes a guest or re-enters engine
+operations. Return preparation validates the current binding and the complete
+Locked caller chain; interrupt preparation validates its owning core and each
+callee link before any mutation. Local Deliver does not swap hardware.
+Paused-callback real-thread tests and Loom exercise competing claims during
+the save window. The notification transaction now reuses this prepared-return
+path, as described below.
+
+Validation correction: dom1's explicit confidential profile replaces the
+whole `policies` section, so omitting `exits` had restored ALL masks despite
+the built-in confidential profile's NONE defaults. The explicit profile now
+declares NONE, with a failing-before/passing-after resolved-profile test.
+The actual NONE-mask live run stops at its first forwarded CPUID, before
+Linux console or the earlier PV LAPIC guard. A disposable, explicitly
+CPUID-authorized diagnostic confirms the first request is leaf 0 with
+nonzero ECX: the submitted table uses exact subleaf matching even for
+non-indexed leaves. Generic emulated ranges/index semantics are required;
+broadening production register masks or silently using host CPUID is not a
+substitute. Standard two-CPU Linux and the live PV suite pass the handoff.
+
+The approved CPUID follow-up exposes generic exact emulated ranges through
+the normal domain-mediated policy setter (CPUID and MSR, with optional VP
+scope). Wire selectors preserve full-width endpoints and result words;
+word selection is independent of VP selection. Non-indexed CHV entries
+cover all ECX values; indexed entries retain explicit answers and zero
+gap/tail ranges. Configured points take precedence through non-overlapping
+splits, not implicit widening. Native table production supplies explicit
+index flags; unknown or ambiguous metadata is rejected. CHV also emits the
+configured CPUID default instead of silently retaining Trap. No confidential
+register masks or capability rights are broadened. Independent review, full
+plain/translated engine and Loom suites, ABI/CHV tests, release CLI and full
+release stack/package pass. Live PV and two-CPU standard Linux
+(SSH/root/network/clean shutdown) pass. Actual NONE-mask confidential Linux
+now gets past CPUID and fails at a later CR_ACCESS exit: CHV's register read
+is denied with EPERM as required. The profile defaults to parent trapping;
+an explicit local-vs-parent CR policy remains to be resolved, not a broader
+register mask. This is not a full confidential boot or proof of reaching
+the PV LAPIC guard. The parent test VM was shut down cleanly.
+
+On 2026-11-25, dom1's confidential profile explicitly selects local
+CR_ACCESS handling through the existing engine exit policy, retaining NONE
+read/write masks and the default parent-trap policy. A failing-before/
+passing-after policy-stream regression, all 49 CHV Themis tests and full
+release stack/package pass. The strict live run clears CR_ACCESS and reaches
+port I/O, but cannot exchange its operands/replies with CHV under NONE
+masks. A separate disposable diagnostic authorized only I/O-exit RAX through
+capa; Linux then initializes the two-VP PV channel and reaches the known
+missing-PV-LAPIC guard at 0xfee000f0. Production masks were not widened.
+This diagnostic is not a production solution: byte/word OUT must not expose
+unrelated upper RAX bits, and byte/word IN must not authorize whole-register
+replacement. An operand-only capability-mediated I/O/PV path and explicit
+failure for ineffective unauthorized emulation remain to be designed.
+Live PV still passes; parent was shut down cleanly and disk preserved.
+
+Prepare the return only after
+draining pending core updates, then perform no hardware/platform-lock work
+inside the queue's infallible state-commit callback. Complete hardware handoff
+under the operation lock after releasing the queue producer lock.
+
+Prevalidate all ring write extents and capacity, including page/ring wraps,
+before any publication; the former padding recursion did not preserve the
+unchanged-on-full guarantee. Cursor occupancy/advancement uses u32 wrapping
+arithmetic. All driver RX consumers must share a serialization/dispatch
+protocol. Recipient-global non-reused binding IDs let that dispatcher route
+notifications from any child independently of which VP drained the queue.
+Linux eventfd subscriptions are mutable and detached separately from fixed
+bindings; use an exact existing-binding lookup for sealed reattachment.
+Match subscription identity precisely and ignore unsubscribed stale IDs.
+Since explicit RING supplies only key/value, do not accept ambiguously
+overlapping rules distinguished only by access size or PIO/MMIO namespace.
+Canonicalize ignored wildcard fields and validate raw arguments before casts.
+
+**Notification implementation (2026-11-25).** Bindings now live in the source
+domain's engine-owned state. SET plus direct child ownership authorizes
+pre-seal registration; GET permits exact lookup after seal. Removal takes
+the exclusive operation lock and IDs are allocated monotonically per
+recipient, not per child. Attestation snapshots that same inventory into a
+flagged extension: the 40-byte header's former reserved word is the count,
+and 40-byte binding entries follow the PA map, before the signed envelope.
+The existing signature therefore covers IDs, recipient and match rules.
+No independent peer/provenance model or new attestation operation is added.
+The [engine reference](../capability-engine/semantics.md#notification-bindings-doorbells)
+documents the concrete types, storage and lifecycle; the
+[DomainComm reference](../domain-comm.md#domcomm_msg_attest--binary-attestation-report)
+documents the notification entry offsets and signed layout.
+
+`notify_return` validates the binding and complete caller chain, then asks
+the platform to publish the entry and invoke the infallible prepared return.
+The platform prevalidates capacity and both backing pointers before writing,
+publishes the head once, drops the recipient producer lock, then commits the
+hardware return under the engine lock. No monitor-owned binding table remains.
+DomainComm 1.0 uses power-of-two logical capacity to preserve u32 rollover
+offsets; RX messages may cross pages. Older driver/monitor major versions
+are intentionally incompatible. Driver RX consumers share one lock and
+dispatch interleaved notifications; global subscription routing uses the
+recipient-global IDs, with exact eventfd lifecycle checks.
+
+Live validation also exposed the old all-chunks attestation enqueue exhausting
+the child's RX ring. Offset zero now retains one engine-derived report
+snapshot; each call publishes only one chunk, and subsequent offsets read
+the same bytes, including any signed/TPM tail. The driver consumes the whole
+report even for a short user buffer and does not consume another signing
+request for continuations. This is report-transport state, not capability
+authority or a new launch-finalization state.
+
+Plain/translated engine tests, all five Loom suites, ABI tests, release CLI
+and full stack builds pass. Independent implementation review found driver
+locking/registry and version-compatibility issues; those were corrected and
+follow-up review found no significant issues. Live subscription lifecycle
+and authority-freeze checks pass; one- and two-created-VP PV launches verify
+their actual attested bindings and eight alternating ring/yield requests.
+These guest requests still execute only on the BSP, not concurrently on APs.
+Live Ed25519 verification passes, including a multi-chunk report with a valid
+TPM RSA signature while standard Linux is running. This does not complete
+effective-policy/artifact evidence, negative-access acceptance or confidential
+Linux device support. Short-buffer signed retrieval drains all chunks and
+the next full signed report verifies. A simultaneous-child live probe is
+not accepted as a notification result: one child completes, but the other
+fails before execution at deferred SET_GUEST_MEMORY with EEXIST. Exact backing
+ownership/setup remains a prerequisite to that coverage.
+The final standard two-CPU Linux regression passes authenticated SSH, root
+disk and gateway checks, and clean shutdown. The parent test VM is shut down
+and its newest child disk preserved.
+
+**Faithful mappings.** Eliminate the LAPIC ChangeRights special case, including
+its ignored unmaps. Child VMCSes do not use the legacy APIC-access-page
+allocation; remove that obsolete driver/CHV provisioning rather than pretending
+it is a normal memory transfer. Accepted ordinary mappings and unmaps must be
+materialized exactly in EPT and mirrored IOMMU tables. If an architectural
+reservation is actually required, reject conflicting mappings before the
+engine commits instead of silently overriding a successful operation.
+
+**Shared backing and declarations.** Introduce explicit driver backing
+ownership, separate from an individual GPA mapping: pin once, derive an
+owned backing capability, then create the declared RW/NX aliases from
+that exact capability. Reuse it for low/vTOM mappings instead of rediscovering
+a broad parent handle and carving twice. A dedicated carve may group backing
+ownership and revocation, but carving an Alias inherits its Aliased status;
+it does not establish exclusive provenance. A requested private handoff must
+verify that existing derivation facts actually establish exclusivity, and fail
+otherwise. Do not prohibit ordinary alias transfers. Track partial failure,
+mapping refs, revoke and pin lifetime; revoke before unpin/reuse.
+
+Shared-memory peers are selected by sending them aliases. Existing capability
+operations and ownership are the complete authority model; do not introduce
+peer lists, allowed-peer constraints or a second sharing-policy mechanism.
+A backing capability establishes the derivation boundary, and ALIAS/SEND_AT
+establishes each recipient's access. Derive sharing from the capabilities and
+their ownership; no separate sharing-provenance field or model is required
+for this work. Further authorized delegation remains governed
+by the same capability operations, not a promise of permanent pair-only access.
+
+Replace the implicit firmware exception with declared, validated shared ranges
+and exact rights; do not silently add RWX aliases. Confidential ordinary exits
+and interrupt states default to empty parent register masks. Configure only
+the explicit register access needed for initial setup and any supported
+semantic exits, and verify isolation after first entry/return.
+The engine freezes pending VP initialization at seal, before publishing the
+sealed state. Later COMM captures merge only runtime-authorized writes into
+that private snapshot; neither empty masks nor forbidden shared-memory
+changes can discard or replace frozen setup. First entry has no post-seal
+initialization privilege exception.
+
+**Evidence and completion.** Extend the existing post-seal report, preserving
+its bootstrap PA-map format, with versioned effective domain/VP policy,
+notification inventory. Sharing is derived from capability state and ownership,
+not a separate provenance extension. Distinguish
+fixed authorization from mutable runtime state and snapshot facts. Real
+immutable-artifact hashes require withdrawing all CPU/DMA writers before
+measurement and publishing the transfer only afterward; unsupported
+measurement must fail rather than report a zero hash. Do not claim attestable
+deployment until this measurement/evidence gate passes.
+
+Implement and validate in dependency order: scoped execution policy/state;
+hardware projection/disclosure/fault correctness; engine notifications;
+backing ownership and explicit CHV declarations; post-seal
+evidence. Each stage needs focused negative tests and preserved standard-guest
+behavior. Run engine tests with/without address_translation, relevant Loom
+races, capa-cli release build, full bins build, independent implementation
+review/testing, then batched live standard/PV/confidential negative-access
+checks. A confidential stop at the still-unimplemented PV LAPIC service is
+not full guest boot, and fixing these boundaries does not implement virtio.
+
+Independent design review: `150e4da5-2966-444e-8f1e-85f2d38ecc14`.
+The reviewer evaluated the proposal and supplied findings, not a second source
+audit. Incorporated concrete policy lifetime/resolution and notification lock/
+commit rules. The user's correction rejects both allowed-peer policies and
+delegation-right stripping. Prefer uniform #GP denial over the reviewer's
+suggested unconditional parent fault report, which would bypass configured
+disclosure and cannot cover a caller without a parent. Do not introduce the
+suggested IOMMU MSI-window skip: A4 requires faithful EPT/IOMMU projection;
+removing unused dummy LAPIC provisioning does not authorize an exception.
+Full measurement ordering and versioned evidence remain the explicit final
+attestation milestone; no stage before that may claim attestable deployment.
+
+---
+
 ## 1. Problem Statement
 
 Today, when a child domain sends a capability to its parent (via

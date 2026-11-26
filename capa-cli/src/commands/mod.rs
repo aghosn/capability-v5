@@ -6,12 +6,16 @@ pub mod info;
 pub mod execution;
 pub mod session_cmd;
 pub mod tutos;
+pub mod capability;
 
 use crate::state::CliState;
 
 /// Dispatch a command to the appropriate handler
 pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::Result<(), String> {
     match cmd {
+        "create-doorbell" | "notify" | "doorbells" | "send-capability" | "accept" =>
+            capability::dispatch(state, cmd, args),
+        "revoke" if args.len() == 3 => capability::dispatch(state, cmd, args),
         // Domain commands
         "init" => domain::cmd_init(state, args),
         "create-domain" => domain::cmd_create_domain(state, args),

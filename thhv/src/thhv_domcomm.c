@@ -19,20 +19,20 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/io.h>
-#include <asm/cpuid.h>
+#include <asm/processor.h>
 
 #include "thhv_internal.h"
 
 /* ── Global DomainComm instance ────────────────────────────────────────────── */
 
 struct domcomm_state thhv_domcomm;
+DEFINE_MUTEX(thhv_domcomm_lock);
 
 /* ── Ring helpers ──────────────────────────────────────────────────────────── */
 
 /*
  * Translate a logical byte offset into (page_index, page_offset).
- * Messages never cross page boundaries, so the caller must handle
- * padding when a message doesn't fit in the remaining page space.
+ * The logical capacity may be smaller than the allocated backing.
  */
 static inline void ring_offset_to_page(const struct domcomm_ring *ring,
 				       u32 byte_offset,
@@ -116,6 +116,8 @@ int domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
 		return -EAGAIN;
 
 	avail = head - tail;
+	if (avail > ring->capacity || avail < sizeof(mhdr))
+		return -EIO;
 
 	/* Peek at the message header. */
 	ring_read(ring, tail, &mhdr, sizeof(mhdr));
@@ -134,13 +136,16 @@ int domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
 					 out_type, out_payload_size);
 	}
 
-	if (mhdr.total_size > avail) {
+	if (mhdr.total_size < sizeof(mhdr) || mhdr.total_size > PAGE_SIZE ||
+	    mhdr.total_size > avail) {
 		pr_warn("thhv: domcomm RX: corrupt message (size %u > avail %u)\n",
 			mhdr.total_size, avail);
 		return -EIO;
 	}
 
 	payload_size = mhdr.total_size - sizeof(mhdr);
+	*out_type = mhdr.message_type;
+	*out_payload_size = payload_size;
 	if (payload_size > buf_size)
 		return -ENOSPC;
 
@@ -153,6 +158,37 @@ int domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
 	/* Advance tail with release semantics. */
 	smp_store_release(ring->tail, tail + mhdr.total_size);
 	return 0;
+}
+
+/* Caller holds thhv_domcomm_lock for the complete request/reply exchange. */
+int domcomm_rx_dequeue_reply(struct domcomm_ring *ring, void *buf, u32 buf_size,
+			     u32 expected_type, u32 *out_payload_size)
+{
+	struct domcomm_doorbell_event notification;
+	u32 type, size;
+	int ret;
+
+	for (;;) {
+		ret = domcomm_rx_dequeue(ring, buf, buf_size, &type, &size);
+		if (ret == -ENOSPC && type == DOMCOMM_MSG_DOORBELL_EVENT) {
+			ret = domcomm_rx_dequeue(ring, &notification, sizeof(notification),
+						 &type, &size);
+			if (ret)
+				return ret;
+			thhv_dispatch_doorbell_event(&notification, size);
+			continue;
+		}
+		if (ret)
+			return ret;
+		if (type == DOMCOMM_MSG_DOORBELL_EVENT) {
+			thhv_dispatch_doorbell_event(buf, size);
+			continue;
+		}
+		if (type != expected_type)
+			return -EPROTO;
+		*out_payload_size = size;
+		return 0;
+	}
 }
 
 /*
@@ -283,17 +319,10 @@ int domcomm_tx_enqueue(struct domcomm_ring *ring, u32 msg_type,
 /*
  * domcomm_request_grow — grow the RX or TX ring by nr_pages.
  *
- * 1. alloc_pages(order)
- * 2. GPA→HPA for each page
- * 3. Find parent cap in cap table → CARVE
- * 4. REGISTER_COMM(carved_handle, self_domain_handle, 0) → self-ref COMM
- * 5. tx_enqueue(GROW_RX or GROW_TX, {handle, sub, nr_pages})
- * 6. VMCALL DOMCOMM_NOTIFY → capavisor processes TX ring
- * 7. rx_dequeue → GROW_ACK → remap pages, extend local ring
- *
- * Returns 0 on success.
+ * Commit one independently translated page at a time. All local allocations
+ * precede NOTIFY; successful completion transfers its lifetime to DomainComm.
  */
-int domcomm_request_grow(bool grow_rx, u32 nr_pages)
+static int domcomm_request_grow_locked(bool grow_rx, u32 nr_pages)
 {
 	struct domcomm_state *dc = &thhv_domcomm;
 	struct domcomm_ring *ring = grow_rx ? &dc->rx : &dc->tx;
@@ -301,25 +330,39 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 	u64 gpa, hpa, parent_handle, sub;
 	u64 carved_handle;
 	struct domcomm_grow_request req;
-	struct domcomm_grow_ack ack;
-	u32 out_type, out_size;
-	void __iomem **new_vas;
-	u32 old_nr, i;
+	u64 count, capacity;
+	void __iomem **new_vas = NULL;
+	void __iomem *va = NULL;
+	u32 old_nr;
 	int ret, order;
 
 	if (!dc->initialized)
 		return -ENODEV;
 
-	if (dc->self_domain_handle == 0) {
-		pr_err("thhv: domcomm grow: no self-domain handle\n");
+	if (!(dc->features & THHV_DOMCOMM_SYNC_GROW))
+		return -EOPNOTSUPP;
+	if (nr_pages != 1 || ring->nr_pages >= U32_MAX / PAGE_SIZE)
 		return -EINVAL;
-	}
 
 	/* Allocate physically contiguous pages. */
 	order = get_order(nr_pages * PAGE_SIZE);
 	pages = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
 	if (!pages)
 		return -ENOMEM;
+
+	old_nr = ring->nr_pages;
+	new_vas = kmalloc_array(old_nr + 1, sizeof(*new_vas), GFP_KERNEL);
+	if (!new_vas) {
+		ret = -ENOMEM;
+		goto err_free;
+	}
+	memcpy(new_vas, ring->page_vas, old_nr * sizeof(*new_vas));
+	va = memremap((u64)page_to_pfn(pages) << PAGE_SHIFT, PAGE_SIZE, MEMREMAP_WB);
+	if (!va) {
+		ret = -ENOMEM;
+		goto err_free;
+	}
+	new_vas[old_nr] = va;
 
 	/* Translate GPA → HPA (Linux pfn is the GPA in our context). */
 	gpa = page_to_pfn(pages) << PAGE_SHIFT;
@@ -346,7 +389,7 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 	/* CARVE a new capability for the growth pages. */
 	ret = themis_carve(parent_handle, hpa,
 			       nr_pages * PAGE_SIZE,
-			       7 /* RWX */,
+			       THHV_MEM_R_READ | THHV_MEM_R_WRITE,
 			       &carved_handle, &sub);
 	if (ret) {
 		pr_err("thhv: domcomm grow: CARVE failed (%d)\n", ret);
@@ -366,9 +409,7 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 
 	pr_info("thhv: grow[4] cap_table_insert ok\n");
 
-	/* REGISTER_COMM(carved_handle, self_domain_handle, 0) — self-ref. */
-	ret = themis_register_comm(carved_handle,
-				   dc->self_domain_handle, 0);
+	ret = themis_register_comm(carved_handle, THEMIS_CAP_SELF, U32_MAX);
 	if (ret) {
 		pr_err("thhv: domcomm grow: REGISTER_COMM failed (%d)\n", ret);
 		goto err_cap_remove;
@@ -394,64 +435,21 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 	pr_info("thhv: grow[6] tx_enqueue ok, calling NOTIFY...\n");
 
 	/* Notify capavisor to process the TX ring. */
-	ret = themis_domcomm_notify();
+	ret = themis_domcomm_notify_grow(&count, &capacity);
 	if (ret) {
 		pr_err("thhv: domcomm grow: DOMCOMM_NOTIFY failed (%d)\n", ret);
 		goto err_cap_remove;
 	}
 
-	pr_info("thhv: grow[7] NOTIFY returned, checking RX for ACK...\n");
-
-	/* Read the GROW_ACK from RX ring. */
-	ret = domcomm_rx_dequeue(&dc->rx, &ack, sizeof(ack),
-				 &out_type, &out_size);
-	if (ret) {
-		pr_err("thhv: domcomm grow: no ACK on RX ring (%d)\n", ret);
-		goto err_cap_remove;
-	}
-	if (out_type != DOMCOMM_MSG_GROW_ACK) {
-		pr_err("thhv: domcomm grow: unexpected msg type %#x (expected GROW_ACK)\n",
-		       out_type);
-		ret = -EPROTO;
-		goto err_cap_remove;
-	}
-	if (ack.status != 0) {
-		pr_err("thhv: domcomm grow: ACK status=%u\n", ack.status);
-		ret = -EIO;
-		goto err_cap_remove;
-	}
-
-	/* Extend the local ring: remap new pages, grow page_vas array. */
-	old_nr = ring->nr_pages;
-	new_vas = krealloc(ring->page_vas,
-			   (old_nr + nr_pages) * sizeof(void *),
-			   GFP_KERNEL);
-	if (!new_vas) {
-		ret = -ENOMEM;
-		goto err_cap_remove;
-	}
+	/* Nothing after successful adoption allocates or frees backing pages. */
+	kfree(ring->page_vas);
 	ring->page_vas = new_vas;
-
-	for (i = 0; i < nr_pages; i++) {
-		u64 page_gpa = gpa + i * PAGE_SIZE;
-		void __iomem *va = memremap(page_gpa, PAGE_SIZE, MEMREMAP_WB);
-
-		if (!va) {
-			pr_err("thhv: domcomm grow: memremap page %u failed\n", i);
-			break;
-		}
-		ring->page_vas[old_nr + i] = va;
-	}
-	ring->nr_pages  = old_nr + i;
-	ring->capacity  = ring->nr_pages * PAGE_SIZE;
-
-	/* Re-read head/tail pointers (capavisor may have updated page_count). */
-	if (grow_rx) {
-		ring->head = &dc->hdr->rx.head;
-		ring->tail = &dc->hdr->rx.tail;
-	} else {
-		ring->head = &dc->hdr->tx.head;
-		ring->tail = &dc->hdr->tx.tail;
+	ring->nr_pages  = old_nr + 1;
+	ring->capacity  = rounddown_pow_of_two(ring->nr_pages * PAGE_SIZE);
+	dc->total_pages++;
+	if (count != ring->nr_pages || capacity != ring->capacity) {
+		pr_err("thhv: committed growth returned inconsistent metadata\n");
+		return -EPROTO;
 	}
 
 	pr_info("thhv: domcomm %s ring grown by %u pages → %u pages (%u bytes)\n",
@@ -462,9 +460,42 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 err_cap_remove:
 	thhv_cap_table_remove(carved_handle);
 err_revoke:
-	themis_revoke_mem(parent_handle, sub);
+	{
+		int revoke_ret = themis_revoke(parent_handle, sub);
+
+		if (revoke_ret) {
+			pr_err("thhv: growth cleanup revoke failed (%d); retaining page\n",
+			       revoke_ret);
+			memunmap(va);
+			kfree(new_vas);
+			return ret;
+		}
+	}
 err_free:
+	if (va)
+		memunmap(va);
+	kfree(new_vas);
 	__free_pages(pages, order);
+	return ret;
+}
+
+int domcomm_request_grow(bool grow_rx, u32 nr_pages)
+{
+	u32 i;
+	int ret = 0;
+
+	if (!nr_pages || nr_pages > 256)
+		return -EINVAL;
+	mutex_lock(&thhv_domcomm_lock);
+	for (i = 0; i < nr_pages; i++) {
+		ret = domcomm_request_grow_locked(grow_rx, 1);
+		if (ret) {
+			pr_err("thhv: %s growth stopped after %u/%u pages (%d)\n",
+			       grow_rx ? "RX" : "TX", i, nr_pages, ret);
+			break;
+		}
+	}
+	mutex_unlock(&thhv_domcomm_lock);
 	return ret;
 }
 
@@ -498,6 +529,15 @@ static int domcomm_ring_init(struct domcomm_ring *ring,
 			       page_index, dc->total_pages);
 			return -EINVAL;
 		}
+		if (dc->features & THHV_DOMCOMM_PAGE_LIST) {
+			u32 eax, ebx, ecx, edx;
+
+			cpuid_count(THHV_CPUID_DOMCOMM_LEAF, page_index + 1,
+				    &eax, &ebx, &ecx, &edx);
+			if (ecx != 1)
+				return -EPROTO;
+			page_gpa = ((u64)ebx << 32) | eax;
+		}
 
 		va = memremap(page_gpa, PAGE_SIZE, MEMREMAP_WB);
 		if (!va) {
@@ -508,7 +548,7 @@ static int domcomm_ring_init(struct domcomm_ring *ring,
 		ring->page_vas[i] = va;
 	}
 
-	ring->capacity = ring->nr_pages * PAGE_SIZE;
+	ring->capacity = rounddown_pow_of_two(ring->nr_pages * PAGE_SIZE);
 	ring->head = &meta->head;
 	ring->tail = &meta->tail;
 	ring->next_seq = 0;
@@ -529,6 +569,8 @@ static void domcomm_ring_cleanup(struct domcomm_ring *ring)
 	}
 	kfree(ring->page_vas);
 	ring->page_vas = NULL;
+	ring->nr_pages = 0;
+	ring->capacity = 0;
 }
 
 /*
@@ -551,7 +593,7 @@ int domcomm_init(void)
 	if (dc->initialized)
 		return 0;
 
-	cpuid(THHV_CPUID_DOMCOMM_LEAF, &eax, &ebx, &ecx, &edx);
+	cpuid_count(THHV_CPUID_DOMCOMM_LEAF, 0, &eax, &ebx, &ecx, &edx);
 
 	gpa = ((u64)ebx << 32) | eax;
 	if (gpa == 0 || ecx == 0) {
@@ -562,6 +604,7 @@ int domcomm_init(void)
 
 	dc->gpa = gpa;
 	dc->total_pages = ecx;
+	dc->features = edx;
 
 	pr_info("thhv: DomainComm at GPA %#llx (%u pages = %u KiB)\n",
 		gpa, ecx, ecx * 4);
@@ -600,16 +643,18 @@ int domcomm_init(void)
 	/* Init RX ring (we are the consumer). */
 	ret = domcomm_ring_init(&dc->rx, &hdr->rx, dc);
 	if (ret)
-		goto err_unmap_base;
+		goto err_cleanup_rx;
 
 	/* Init TX ring (we are the producer). */
 	ret = domcomm_ring_init(&dc->tx, &hdr->tx, dc);
 	if (ret)
-		goto err_cleanup_rx;
+		goto err_cleanup_tx;
 
 	dc->initialized = true;
 	return 0;
 
+err_cleanup_tx:
+	domcomm_ring_cleanup(&dc->tx);
 err_cleanup_rx:
 	domcomm_ring_cleanup(&dc->rx);
 err_unmap_base:

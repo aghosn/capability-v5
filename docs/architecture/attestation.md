@@ -38,7 +38,52 @@ Together these allow a remote verifier to establish:
 | Userspace crypto verification test | `thhv/test/test_attestation.c` | Done (P20j) |
 | CRB transport + runtime selection | `tpm2/src/crb.rs`, `attestation.rs` | Done (P20k) |
 
-All attestation features are **complete and tested**.
+Cryptographic signing and the existing transport are implemented. Complete
+deployment evidence (including effective policy and immutable-artifact
+measurements) remains separate work; a signed report proves only the facts
+actually present in its engine-derived snapshot.
+
+### 2.1 Current Domain Report Format
+
+The implemented report is a variable-length common base followed, in signed
+mode, by a `SignedEnvelope` and optional TPM blobs:
+
+```text
+AttestReport header (40 bytes)
+MemCapEntry[nr_mem_caps]             (40 bytes each)
+DomCapEntry[nr_dom_caps]             (16 bytes each)
+PaMapEntry[nr_pa_entries]            (24 bytes each)
+DoorbellEntry[nr_doorbells]         (40 bytes each)
+--- signed reports only ---
+SignedEnvelope (168 bytes)
+TPM quote, TPM signature, AK public-key blobs (sizes from envelope)
+```
+
+Doorbells are immutable children of recipient domain capabilities. Reports
+inventory recipient-tree objects and held invocation handles, including
+recipient, port, handle, vector, kind and Async target VP. Header flag
+`DOMCOMM_ATTEST_F_DOORBELLS` (`1 << 2`) is always set; offset 36 holds
+`nr_doorbells`. The retired notification-format bit (`1 << 1`) is rejected.
+
+The signature is
+`Ed25519(SHA-256(common_base || nonce || user_pub_key))`: every doorbell byte
+is covered along with the other arrays. A verifier locates the envelope at
+`40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24 + nr_doorbells*40`,
+checks the signature and its nonce/key binding, and compares the reported
+authorizations with the expected deployment. Eventfd subscriptions and VMM
+device-match rules are not attestation content.
+
+Offset zero of `ATTEST_SELF` captures the report; each call returns one
+chunk. Continuations use that same cached snapshot, including the signed
+tail, rather than rebuilding the report or consuming another signing request.
+A new offset-zero request captures current state, including any doorbell
+revocations since the preceding report. This cache is report-transport state,
+not a new capability or launch-finalization state.
+
+See [doorbell types and lifecycle](../capability-engine/semantics.md#doorbell-capabilities)
+and the [DomainComm wire reference](../domain-comm.md#domcomm_msg_attest--binary-attestation-report).
+The older signed-wrapper sketches below are superseded by this common-base
+layout.
 
 ---
 
@@ -140,6 +185,9 @@ pub struct BootAttestation {
 ---
 
 ## 7. AttestReport Extension (Signed)
+
+> Original wrapper proposal; see section 2.1 for the implemented array-based
+> common base and signed envelope.
 
 The existing `AttestReport` struct describes TD configuration but has no signature.
 Extend with a signed wrapper:
@@ -434,9 +482,9 @@ TPM manufacturer cert → EK → AK → Quote(PCR[11])
 The signed attestation response is variable-length (TPM blobs vary in size):
 
 ```
-SignedAttestReportHeader {            // fixed part
-    report: AttestReport,             //  40 bytes — domain state
-    signature: [u8; 64],              //  64 bytes — Ed25519(SHA-256(report ‖ nonce ‖ user_pub_key))
+// Common base first: AttestReport + caps + PA map + doorbells.
+SignedEnvelope {
+    signature: [u8; 64],              //  64 bytes — Ed25519(SHA-256(common_base ‖ nonce ‖ user_pub_key))
     pub_key: [u8; 32],                //  32 bytes — capavisor Ed25519 public key
     nonce: [u8; 32],                  //  32 bytes — echoed back
     user_pub_key: [u8; 32],           //  32 bytes — verifier's public key (echoed back)
@@ -444,7 +492,7 @@ SignedAttestReportHeader {            // fixed part
     tpm_sig_size: u16,                //   2 bytes — TPM signature length (0 if no TPM)
     ak_pub_size: u16,                 //   2 bytes — AK public area length (0 if no TPM)
     reserved: u16,                    //   2 bytes
-}                                     // 240 bytes total fixed header
+}                                     // 168 bytes, after the common base
 // Followed by variable-length TPM data:
 //   tpm_quote[tpm_quote_size]        — raw TPMS_ATTEST bytes
 //   tpm_sig[tpm_sig_size]            — raw TPMT_SIGNATURE bytes
@@ -458,10 +506,10 @@ The verifier decides whether Ed25519-only attestation is acceptable.
 
 **VMCALL convention:**
 
-| Mode | arg0 | arg1 | Behavior |
-|------|------|------|----------|
-| Unsigned (init) | 0 | 0 | Legacy: nonce=0 via registers, returns PA map + caps |
-| Signed (attest) | 1 | TX ring msg sequence | Read AttestRequest from TX ring |
+| Mode | arg0 | arg1 | arg2 | Behavior |
+|------|------|------|------|----------|
+| Unsigned (init) | 0 | Byte offset | Ignored | Offset zero captures an unsigned report; returns one chunk |
+| Signed (attest) | 1 | Byte offset | TX request sequence | Offset zero consumes AttestRequest and captures a signed report; later offsets return cached chunks |
 
 **Request flow (signed path):**
 
@@ -476,7 +524,7 @@ Userspace                    thhv.ko                  Capavisor
     │                           │   {nonce, user_pub_key})│
     │                           │   → sequence = S        │
     │                           │                         │
-    │                           │ VMCALL(0x0C, 1, S, 0,0) │
+    │                           │ VMCALL(0x0C, 1, 0, S,0) │
     │                           │────────────────────────>│
     │                           │                         │ dequeue TX head
     │                           │                         │ verify seq == S
@@ -486,7 +534,9 @@ Userspace                    thhv.ko                  Capavisor
     │                           │                         │ TPM2_Quote(AK,nonce,[11])
     │                           │                         │ RX enqueue(ATTEST, blob)
     │                           │<────────────────────────│
-    │                           │ RX dequeue(signed blob) │
+    │                           │ RX dequeue(first chunk) │
+    │                           │ repeat with byte offset│
+    │                           │ until full report read │
     │                           │ mutex_unlock            │
     │<──────────────────────────│                         │
     │ verify Ed25519 sig        │                         │
@@ -499,7 +549,7 @@ Userspace                    thhv.ko                  Capavisor
 1. **thhv (cooperative):** `DEFINE_MUTEX(attest_lock)` serializes the
    `{TX enqueue, VMCALL}` pair across all vCPUs. Prevents races in practice.
 2. **Capavisor (defensive):** Dequeues TX ring head, verifies
-   `msg.sequence == arg1`. If mismatch → `ERR_RACE`. The capavisor never
+   `msg.sequence == arg2` on the first chunk. If mismatch → `ERR_RACE`. The capavisor never
    assumes dom0 correctly serialized its operations.
 
 ### TPM Driver Additions

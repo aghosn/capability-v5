@@ -27,7 +27,7 @@ use crate::vcpu::ActiveVcpu;
 /// `vcpu.next_rip()` separately. Used by the x86 swap-handler early-error
 /// paths in `switch.rs` / `doorbell.rs`, which write the reply themselves
 /// rather than going through the generic dispatcher.
-pub(super) fn write_reply(vcpu: &mut ActiveVcpu, r: HypercallResult) {
+pub(crate) fn write_reply(vcpu: &mut ActiveVcpu, r: HypercallResult) {
     use crate::vcpu::Reg;
     vcpu.set_reg(Reg::Rax, r.status);
     vcpu.set_reg(Reg::Rdi, r.val0);
@@ -56,17 +56,6 @@ impl ArchHypercall for X86Platform {
         vp_id: u64,
     ) {
         switch::do_switch(platform, caller, to_domain_handle, vp_id, vcpu);
-    }
-
-    fn h_ring_doorbell(
-        &mut self,
-        vcpu: &mut ActiveVcpu,
-        platform: &ThemisPlatform,
-        caller: &CapabilityRef<Domain>,
-        gpa: u64,
-        value: u64,
-    ) {
-        doorbell::do_ring_doorbell(platform, caller, gpa, value, vcpu);
     }
 
     fn h_inject_interrupt(

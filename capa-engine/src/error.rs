@@ -67,6 +67,8 @@ pub enum CapaError {
 
     /// Out of memory or resource limit reached
     NoMemory,
+    /// Recipient notification queue has no space; no delivery or return occurred.
+    NotificationQueueFull,
 }
 
 impl fmt::Display for CapaError {
@@ -101,6 +103,7 @@ impl fmt::Display for CapaError {
             }
             CapaError::InvalidValue => write!(f, "Invalid value for a policy field"),
             CapaError::NoMemory => write!(f, "Out of memory or resource limit reached"),
+            CapaError::NotificationQueueFull => write!(f, "Notification queue is full"),
         }
     }
 }

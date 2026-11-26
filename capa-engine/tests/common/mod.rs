@@ -35,8 +35,9 @@ use parking_lot::{
 };
 
 use capability_engine::{
-    CapaError, CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result, Semaphore,
-    SwitchManager, Update,
+    Access, Attributes, CapaError, Capability, CapabilityRef, CoreId, Domain, DomainId,
+    LocalHandle, MemoryRegion, OpLockGuard, Platform, Result, Semaphore,
+    SwitchContext, SwitchManager, Update, VpHandoff,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +125,8 @@ pub struct TestPlatformInner {
     pub applied_updates: Vec<Update>,
     /// VP register storage: (domain_id, vp_id, reg_id) → value
     pub registers: BTreeMap<(DomainId, u64, u64), u64>,
+    comm_snapshots: Vec<(DomainId, u32, capability_engine::RegBitmap)>,
+    comm_snapshot_failure: Option<u32>,
     /// Ordered log of `apply_update` / `on_domain_revoked` calls, in the
     /// exact order the engine invoked them.  Used by ordering tests to
     /// verify that `on_domain_revoked` fires strictly before
@@ -206,6 +209,73 @@ pub struct TestPlatform {
     /// named core and drains its queue via the real `apply_core_updates`.
     /// `None` (the default) makes `send_ipi` the same no-op it always was.
     ipi_sender: Arc<parking_lot::Mutex<Option<Sender<CoreId>>>>,
+    handoff_hook: parking_lot::Mutex<Option<Arc<HandoffHook>>>,
+    before_shared_lock: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pub doorbells: parking_lot::Mutex<Vec<capability_engine::DoorbellNotification>>,
+    pub pending_interrupts: parking_lot::Mutex<std::collections::BTreeSet<(DomainId, u64, u8)>>,
+    pub notification_full: AtomicBool,
+    boot_memory: parking_lot::Mutex<Vec<CapabilityRef<MemoryRegion>>>,
+}
+
+type HandoffHook = dyn Fn(&SwitchContext, VpHandoff) + Send + Sync;
+
+/// Initial boot grant; all derived memory and COMM bindings use the mediated API.
+pub fn bootstrap_memory(
+    root: &CapabilityRef<Domain>,
+    start: u64,
+    size: u64,
+) -> (LocalHandle, CapabilityRef<MemoryRegion>) {
+    let mut domain = root.write();
+    assert_eq!(domain.data.id, 0);
+    assert!(domain.parent.upgrade().is_none());
+    let handle = domain.data.allocate_memory_handle();
+    let memory = Capability::new_root(0, handle, MemoryRegion::new_root(start, size));
+    memory.write().owned.owner_domain = Some(Arc::downgrade(root));
+    domain.data.add_memory_capability(handle, Arc::downgrade(&memory));
+    (handle, memory)
+}
+
+pub fn carve_test_memory(
+    platform: &dyn Platform,
+    caller: &CapabilityRef<Domain>,
+    size: u64,
+) -> LocalHandle {
+    let (parent, access) = {
+        let domain = caller.read();
+        domain.data.memory_capabilities.iter().find_map(|(handle, weak)| {
+            let memory = weak.upgrade()?;
+            let memory = memory.read();
+            if memory.owned.attributes != Attributes::NONE {
+                return None;
+            }
+            memory.compute_view().into_iter()
+                .find(|range| range.size >= size)
+                .map(|range| (*handle, Access::new(range.start, size, range.rights)))
+        }).expect("fixture must provision enough memory through SEND")
+    };
+    Capability::carve(platform, caller, parent, access).unwrap().0
+}
+
+pub fn add_test_vps(
+    platform: &dyn Platform,
+    parent: &CapabilityRef<Domain>,
+    child: LocalHandle,
+    count: usize,
+) {
+    for _ in 0..count {
+        let comm = carve_test_memory(platform, parent, 0x1000);
+        Capability::add_vp(platform, parent, child, comm).unwrap();
+    }
+}
+
+pub fn delegate_test_memory(
+    platform: &dyn Platform,
+    parent: &CapabilityRef<Domain>,
+    child: LocalHandle,
+    size: u64,
+) {
+    let memory = carve_test_memory(platform, parent, size);
+    Capability::send(platform, parent, memory, child, Attributes::NONE).unwrap();
 }
 
 /// Fixed core count for the test platform. Tests observed to use core IDs
@@ -221,11 +291,34 @@ impl Default for TestPlatform {
             switch_manager: Arc::new(SwitchManager::new(TEST_PLATFORM_NUM_CORES)),
             real_semaphore: false,
             ipi_sender: Arc::new(parking_lot::Mutex::new(None)),
+            handoff_hook: parking_lot::Mutex::new(None),
+            before_shared_lock: parking_lot::Mutex::new(None),
+            doorbells: parking_lot::Mutex::new(Vec::new()),
+            pending_interrupts: parking_lot::Mutex::new(Default::default()),
+            notification_full: AtomicBool::new(false),
+            boot_memory: parking_lot::Mutex::new(Vec::new()),
         }
     }
 }
 
 impl TestPlatform {
+    pub fn operation_lock_is_held(&self) -> bool {
+        self.op_lock.try_write().is_none()
+    }
+
+    pub fn before_next_shared_lock(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_shared_lock.lock() = Some(Box::new(hook));
+    }
+
+    /// Model the initial physical-memory grant to the boot root, retaining its backing tree.
+    pub fn ensure_boot_memory(&self, root: &CapabilityRef<Domain>) {
+        assert_eq!(root.read().data.id, 0, "only the boot root receives initial memory");
+        if root.read().data.memory_capabilities.is_empty() {
+            let (_, memory) = bootstrap_memory(root, 0x1000_0000, 0x1000_0000);
+            self.boot_memory.lock().push(memory);
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -256,6 +349,21 @@ impl TestPlatform {
     /// Consume all updates recorded since the last drain (useful in assertions).
     pub fn drain_updates(&self) -> Vec<Update> {
         self.inner.lock().applied_updates.drain(..).collect()
+    }
+
+    pub fn drain_comm_snapshots(&self) -> Vec<(DomainId, u32, capability_engine::RegBitmap)> {
+        self.inner.lock().comm_snapshots.drain(..).collect()
+    }
+
+    pub fn set_comm_snapshot_failure(&self, vp_id: Option<u32>) {
+        self.inner.lock().comm_snapshot_failure = vp_id;
+    }
+
+    pub fn set_handoff_hook(
+        &self,
+        hook: impl Fn(&SwitchContext, VpHandoff) + Send + Sync + 'static,
+    ) {
+        *self.handoff_hook.lock() = Some(Arc::new(hook));
     }
 
     /// Return the domain a core is currently running, if any.
@@ -298,7 +406,38 @@ impl TestPlatform {
 }
 
 impl Platform for TestPlatform {
+    fn commit_doorbell(
+        &self,
+        notification: &capability_engine::DoorbellNotification,
+        commit: &mut dyn FnMut(),
+    ) -> Result<()> {
+        {
+            let mut queue = self.doorbells.lock();
+            if self.notification_full.load(Ordering::Acquire) {
+                return Err(CapaError::NotificationQueueFull);
+            }
+            queue.push(*notification);
+            self.pending_interrupts.lock().insert((
+                notification.doorbell.recipient, notification.recipient_vp,
+                notification.doorbell.vector,
+            ));
+        }
+        commit();
+        Ok(())
+    }
+
+    fn handoff_vp(&self, context: &SwitchContext, handoff: VpHandoff) {
+        let hook = self.handoff_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook(context, handoff);
+        }
+    }
+
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
+        let hook = self.before_shared_lock.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(Box::new(TestSharedLock {
             _guard: self.op_lock.read_arc(),
         }))
@@ -423,6 +562,22 @@ impl Platform for TestPlatform {
 
     fn register_count(&self) -> u64 {
         64
+    }
+
+    fn snapshot_comm_regs(
+        &self,
+        domain_id: DomainId,
+        vp_id: u32,
+        write_set: capability_engine::RegBitmap,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock();
+        inner.comm_snapshots.push((domain_id, vp_id, write_set));
+        if inner.comm_snapshot_failure == Some(vp_id) {
+            return Err(CapaError::InvalidOperation(
+                "test COMM snapshot failure".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn get_vp_register(

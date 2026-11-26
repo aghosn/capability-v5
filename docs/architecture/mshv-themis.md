@@ -1,5 +1,12 @@
 # mshv-themis: Capability-Aware `/dev/mshv` Driver & Cloud-Hypervisor Backend
 
+> Historical driver design. Current implementation uses `/dev/thhv` and
+> synchronous CPU donation. Address-matched monitor doorbells and
+> `THHV_IOEVENTFD` are removed: ordinary device matching runs in CHV userspace;
+> explicit notifications use immutable doorbell capabilities through generic
+> ownership operations. See [current context](../../CONTEXT.md#5-doorbells--device-events--irqfd)
+> and [doorbell semantics](../capability-engine/semantics.md#doorbell-capabilities).
+
 ## 1. Executive Summary
 
 This document defines the design and implementation plan for **mshv-themis**: a Linux

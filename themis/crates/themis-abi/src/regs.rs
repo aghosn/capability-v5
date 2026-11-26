@@ -861,7 +861,7 @@ pub struct InterceptMessage {
     pub access_size: u8,
     pub is_write: u8,
     pub _reserved: u32,
-    // MMIO intercept fields.
+    // Reserved for wire compatibility; the monitor never exports code bytes.
     pub instruction_bytes: [u8; 16],
 }
 
