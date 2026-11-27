@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#define THEMIS_OP_TOGGLE_DEBUG 0x1d
+#include "../thhv/inc/themis_abi.h"
 
 static inline uint64_t themis_vmcall(uint64_t opcode, uint64_t a0)
 {

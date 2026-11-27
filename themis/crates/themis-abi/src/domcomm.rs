@@ -15,7 +15,7 @@ pub const DOMCOMM_VERSION_MINOR: u16 = 0;
 
 /// CPUID leaf for DomainComm discovery.
 /// EAX:EBX = base GPA (lo:hi), ECX = region size in pages, EDX = flags.
-pub const CPUID_DOMCOMM_LEAF: u32 = 0x4000_0002;
+pub const CPUID_DOMCOMM_LEAF: u32 = crate::cpuid::LEAF_DOMCOMM;
 
 // ── Message types ────────────────────────────────────────────────────────── //
 
@@ -56,6 +56,10 @@ pub const DOMCOMM_FLAG_TX_READY: u32 = 1 << 1;
 pub const DOMCOMM_ATTEST_F_SEALED: u32 = 1 << 0;
 /// Header offset 36 contains the doorbell count, with entries after the PA map.
 pub const DOMCOMM_ATTEST_F_DOORBELLS: u32 = 1 << 2;
+/// Retired address-matched notification inventory; receivers must reject it.
+pub const DOMCOMM_ATTEST_F_RETIRED_NOTIFICATIONS: u32 = 1 << 1;
+pub const DOORBELL_KIND_SYNC: u8 = 0;
+pub const DOORBELL_KIND_ASYNC: u8 = 1;
 
 // ── Error codes ──────────────────────────────────────────────────────────── //
 
@@ -280,8 +284,10 @@ pub fn find_attested_doorbell(
     }
     // SAFETY: the length was checked; the report need not be aligned.
     let header = unsafe { core::ptr::read_unaligned(report.as_ptr().cast::<AttestReport>()) };
-    if header.flags & DOMCOMM_ATTEST_F_DOORBELLS == 0 || header.flags & 2 != 0 {
-        if header.nr_doorbells != 0 || header.flags & 2 != 0 {
+    if header.flags & DOMCOMM_ATTEST_F_DOORBELLS == 0
+        || header.flags & DOMCOMM_ATTEST_F_RETIRED_NOTIFICATIONS != 0
+    {
+        if header.nr_doorbells != 0 || header.flags & DOMCOMM_ATTEST_F_RETIRED_NOTIFICATIONS != 0 {
             return Err(ERR_INVALID);
         }
         return Err(ERR_NOTFOUND);
@@ -303,7 +309,8 @@ pub fn find_attested_doorbell(
     for bytes in entries.chunks_exact(size_of::<DoorbellEntry>()) {
         // SAFETY: chunks_exact supplies a complete entry; alignment is not assumed.
         let entry = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<DoorbellEntry>()) };
-        if entry.port == 0 || entry.kind > 1 || (entry.kind == 0 && entry.vp != 0)
+        if entry.port == 0 || entry.kind > DOORBELL_KIND_ASYNC
+            || (entry.kind == DOORBELL_KIND_SYNC && entry.vp != 0)
             || entry.reserved != [0; 6]
         {
             return Err(ERR_INVALID);
@@ -577,17 +584,29 @@ impl DomCommMessage for DoorbellEvent {
 mod doorbell_attest_tests {
     use super::*;
     use crate::errors::{ERR_INVALID, ERR_NOTFOUND};
+    use core::mem::{offset_of, size_of};
 
-    fn inventory() -> [u8; 120] {
-        let mut bytes = [0; 120];
-        bytes[8..12].copy_from_slice(&DOMCOMM_ATTEST_F_DOORBELLS.to_le_bytes());
-        bytes[36..40].copy_from_slice(&2u32.to_le_bytes());
+    const HEADER_SIZE: usize = size_of::<AttestReport>();
+    const ENTRY_SIZE: usize = size_of::<DoorbellEntry>();
+    const INVENTORY_SIZE: usize = HEADER_SIZE + 2 * ENTRY_SIZE;
+
+    fn inventory() -> [u8; INVENTORY_SIZE] {
+        let mut bytes = [0; INVENTORY_SIZE];
+        let flags = offset_of!(AttestReport, flags);
+        let count = offset_of!(AttestReport, nr_doorbells);
+        bytes[flags..flags + size_of::<u32>()]
+            .copy_from_slice(&DOMCOMM_ATTEST_F_DOORBELLS.to_le_bytes());
+        bytes[count..count + size_of::<u32>()].copy_from_slice(&2u32.to_le_bytes());
         for (index, handle) in [u64::MAX, 17].into_iter().enumerate() {
-            let off = 40 + index * 40;
-            bytes[off..off + 8].copy_from_slice(&7u64.to_le_bytes());
-            bytes[off + 8..off + 16].copy_from_slice(&9u64.to_le_bytes());
-            bytes[off + 16..off + 24].copy_from_slice(&handle.to_le_bytes());
-            bytes[off + 32] = 38;
+            let off = HEADER_SIZE + index * ENTRY_SIZE;
+            let recipient = off + offset_of!(DoorbellEntry, recipient);
+            let port = off + offset_of!(DoorbellEntry, port);
+            let handle_off = off + offset_of!(DoorbellEntry, handle);
+            bytes[recipient..recipient + size_of::<u64>()].copy_from_slice(&7u64.to_le_bytes());
+            bytes[port..port + size_of::<u64>()].copy_from_slice(&9u64.to_le_bytes());
+            bytes[handle_off..handle_off + size_of::<u64>()].copy_from_slice(&handle.to_le_bytes());
+            bytes[off + offset_of!(DoorbellEntry, vector)] = 38;
+            bytes[off + offset_of!(DoorbellEntry, kind)] = DOORBELL_KIND_SYNC;
         }
         bytes
     }
@@ -597,21 +616,27 @@ mod doorbell_attest_tests {
         let mut bytes = inventory();
         assert_eq!(find_attested_doorbell(&bytes, 7, 9).unwrap().handle, 17);
         assert!(matches!(find_attested_doorbell(&bytes, 8, 9), Err(ERR_NOTFOUND)));
-        bytes[96..104].copy_from_slice(&u64::MAX.to_le_bytes());
+        let handle = HEADER_SIZE + ENTRY_SIZE + offset_of!(DoorbellEntry, handle);
+        bytes[handle..handle + size_of::<u64>()].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(matches!(find_attested_doorbell(&bytes, 7, 9), Err(ERR_NOTFOUND)));
     }
 
     #[test]
     fn malformed_or_ambiguous_inventory_is_rejected() {
         let mut bytes = inventory();
-        assert!(matches!(find_attested_doorbell(&bytes[..119], 7, 9), Err(ERR_INVALID)));
-        bytes[56..64].copy_from_slice(&18u64.to_le_bytes());
+        assert!(matches!(
+            find_attested_doorbell(&bytes[..INVENTORY_SIZE - 1], 7, 9),
+            Err(ERR_INVALID)
+        ));
+        let handle = HEADER_SIZE + offset_of!(DoorbellEntry, handle);
+        bytes[handle..handle + size_of::<u64>()].copy_from_slice(&18u64.to_le_bytes());
         assert!(matches!(find_attested_doorbell(&bytes, 7, 9), Err(ERR_INVALID)));
         let mut bytes = inventory();
-        bytes[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        let count = offset_of!(AttestReport, nr_mem_caps);
+        bytes[count..count + size_of::<u32>()].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(find_attested_doorbell(&bytes, 7, 9), Err(ERR_INVALID)));
         let mut bytes = inventory();
-        bytes[119] = 1;
+        bytes[INVENTORY_SIZE - 1] = 1;
         assert!(matches!(find_attested_doorbell(&bytes, 7, 9), Err(ERR_INVALID)));
     }
 }

@@ -45,12 +45,22 @@ pub mod platform {
     pub const IOAPIC_BASE: u64 = 0xfec0_0000;
 }
 
-const WORDS: usize = 15;
-const RECORD_BYTES: usize = 128;
+pub mod layout {
+    pub const WORDS: usize = 15;
+    pub const RECORD_BYTES: usize = 128;
+    pub const GENERATION_LO: usize = 0;
+    pub const GENERATION_HI: usize = 1;
+    pub const IDENTITY: usize = 2;
+    pub const OPERATION: usize = 3;
+    pub const DEVICE_STATUS: usize = 4;
+    pub const ARG_START: usize = 5;
+    pub const ARG_END: usize = 11;
+    pub const HALF_BITS: u32 = 32;
+}
+
+use layout::*;
+
 const RESERVED_WORDS: usize = (PAGE_SIZE - 2 * RECORD_BYTES) / core::mem::size_of::<u64>();
-const ARG_START: usize = 5;
-const ARG_END: usize = 11;
-const HALF_BITS: u32 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -203,16 +213,18 @@ fn pack(low: u32, high: u32) -> u64 {
 
 fn encode(identity: Identity, request: Request) -> [u64; WORDS] {
     let mut words = [0; WORDS];
-    words[..2].copy_from_slice(&identity.generation);
-    words[2] = pack(identity.channel, identity.vp);
-    words[3] = pack(request.service as u32, request.opcode);
-    words[4] = u64::from(request.device);
+    words[GENERATION_LO..=GENERATION_HI].copy_from_slice(&identity.generation);
+    words[IDENTITY] = pack(identity.channel, identity.vp);
+    words[OPERATION] = pack(request.service as u32, request.opcode);
+    words[DEVICE_STATUS] = u64::from(request.device);
     words[ARG_START..ARG_END].copy_from_slice(&request.args);
     words
 }
 
 fn validate_identity(words: &[u64; WORDS], identity: Identity) -> Result<(), Error> {
-    if words[..2] != identity.generation || words[2] != pack(identity.channel, identity.vp) {
+    if words[GENERATION_LO..=GENERATION_HI] != identity.generation
+        || words[IDENTITY] != pack(identity.channel, identity.vp)
+    {
         return Err(Error::Identity);
     }
     if words[ARG_END..].iter().any(|&v| v != 0) {
@@ -258,12 +270,12 @@ impl Client {
         }
         let words = page.completion.snapshot(sequence)?;
         validate_identity(&words, self.identity)?;
-        if words[3] != pack(request.service as u32, request.opcode)
-            || words[4] as u32 != request.device
+        if words[OPERATION] != pack(request.service as u32, request.opcode)
+            || words[DEVICE_STATUS] as u32 != request.device
         {
             return Err(Error::Identity);
         }
-        let status = Status::decode((words[4] >> HALF_BITS) as u32)?;
+        let status = Status::decode((words[DEVICE_STATUS] >> HALF_BITS) as u32)?;
         let mut values = [0; 6];
         values.copy_from_slice(&words[ARG_START..ARG_END]);
         self.pending = None;
@@ -298,19 +310,19 @@ impl Server {
         }
         let mut words = page.request.snapshot(sequence)?;
         validate_identity(&words, self.identity)?;
-        if words[4] >> HALF_BITS != 0 {
+        if words[DEVICE_STATUS] >> HALF_BITS != 0 {
             return Err(Error::Malformed);
         }
         let mut args = [0; 6];
         args.copy_from_slice(&words[ARG_START..ARG_END]);
         let request = Request {
-            service: Service::decode(words[3] as u32)?,
-            opcode: (words[3] >> HALF_BITS) as u32,
-            device: words[4] as u32,
+            service: Service::decode(words[OPERATION] as u32)?,
+            opcode: (words[OPERATION] >> HALF_BITS) as u32,
+            device: words[DEVICE_STATUS] as u32,
             args,
         };
         let completion = dispatch(request);
-        words[4] = pack(request.device, completion.status as u32);
+        words[DEVICE_STATUS] = pack(request.device, completion.status as u32);
         words[ARG_START..ARG_END].copy_from_slice(&completion.values);
         page.completion.publish(sequence, words);
         self.completed = sequence;
@@ -375,7 +387,7 @@ mod tests {
         assert_eq!(client.complete(&page), Err(Error::NoCompletion));
         let mut server = Server::new(ID);
         server.service(&page, echo).unwrap();
-        page.completion.words[0].store(0, Ordering::Relaxed);
+        page.completion.words[GENERATION_LO].store(0, Ordering::Relaxed);
         assert_eq!(client.complete(&page), Err(Error::Identity));
         assert_eq!(client.publish(&page, REQUEST), Err(Error::Busy));
     }
@@ -430,7 +442,7 @@ mod tests {
         page.completion.sequence.store(2, Ordering::Release);
         assert_eq!(client.complete(&page), Err(Error::Sequence));
         page.completion.sequence.store(1, Ordering::Release);
-        page.completion.words[4].store(pack(0, u32::MAX), Ordering::Relaxed);
+        page.completion.words[DEVICE_STATUS].store(pack(0, u32::MAX), Ordering::Relaxed);
         assert_eq!(client.complete(&page), Err(Error::Malformed));
     }
 
@@ -448,7 +460,7 @@ mod tests {
         client.publish(&page, REQUEST).unwrap();
         Server::new(ID)
             .service(&page, |request| {
-                page.request.words[3].store(u64::MAX, Ordering::Relaxed);
+                page.request.words[OPERATION].store(u64::MAX, Ordering::Relaxed);
                 echo(request)
             })
             .unwrap();

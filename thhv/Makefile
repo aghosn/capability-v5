@@ -39,7 +39,7 @@ $(LIBTHEMIS_A):
 
 # Always re-invoke kbuild.  The kernel build system handles its own
 # dependency tracking for C sources; we just need to ensure it runs.
-all: $(LIBTHEMIS_A)
+all: abi-header-check $(LIBTHEMIS_A)
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 	@test -f $(PWD)/thhv.ko || { echo "ERROR: thhv.ko not produced"; exit 1; }
 
@@ -49,13 +49,16 @@ guest:
 	bash $(PWD)/build-guest.sh $(if $(DISK),$(DISK),)
 
 # Build all userspace test binaries into test/bin/.
-tests: $(TEST_BINS)
+abi-header-check:
+	bash $(PWD)/../themis/scripts/generate-abi-header.sh --check
 
-$(TEST_BINDIR)/test_attestation: $(PWD)/test/test_attestation.c $(PWD)/inc/thhv.h
+tests: abi-header-check $(TEST_BINS)
+
+$(TEST_BINDIR)/test_attestation: $(PWD)/test/test_attestation.c $(PWD)/inc/thhv.h $(PWD)/inc/themis_abi.h
 	@mkdir -p $(TEST_BINDIR)
 	$(CC) -Wall -Wextra -O2 -I$(PWD)/inc -o $@ $< -lcrypto
 
-$(TEST_BINDIR)/%: $(PWD)/test/%.c $(PWD)/inc/thhv.h
+$(TEST_BINDIR)/%: $(PWD)/test/%.c $(PWD)/inc/thhv.h $(PWD)/inc/themis_abi.h
 	@mkdir -p $(TEST_BINDIR)
 	$(CC) -Wall -Wextra -O2 -I$(PWD)/inc -o $@ $<
 
@@ -72,4 +75,4 @@ tidy:
 	rm -f $(PWD)/Module.symvers $(PWD)/modules.order
 	rm -rf $(PWD)/.tmp_versions
 
-.PHONY: all clean tidy guest tests
+.PHONY: all abi-header-check clean tidy guest tests

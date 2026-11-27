@@ -22,22 +22,7 @@
 #include <linux/ioctl.h>
 #include <stdint.h>
 
-/* Mirror the ioctl definitions from thhv.h */
-#define THHV_IOCTL_MAGIC  0xB8
-
-#define THHV_TEST_CMD_GROW_RX    1
-#define THHV_TEST_CMD_GROW_TX    2
-#define THHV_TEST_CMD_TX_PING    3
-
-struct thhv_test_cmd {
-	uint32_t command;
-	uint32_t arg;
-	int32_t  result;
-	uint32_t reserved;
-};
-
-#define THHV_TEST \
-	_IOWR(THHV_IOCTL_MAGIC, 0xF0, struct thhv_test_cmd)
+#include "thhv.h"
 
 static int run_test(int fd, uint32_t command, uint32_t arg, const char *name)
 {

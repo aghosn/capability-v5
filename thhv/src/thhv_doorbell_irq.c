@@ -175,9 +175,10 @@ static void discover_vp(void *unused)
 {
 	u32 eax, ebx, ecx, edx;
 
-	cpuid_count(0x40000005, 1, &eax, &ebx, &ecx, &edx);
+	cpuid_count(PV_LEAF, PV_CPUID_CURRENT_VP, &eax, &ebx, &ecx, &edx);
 	doorbell_vps[smp_processor_id()] =
-		edx == 1 && eax < THHV_MAX_VPS_PER_DOMAIN ? eax : U32_MAX;
+		edx == PV_CPUID_VP_VALID && eax < THHV_MAX_VPS_PER_DOMAIN ?
+		eax : U32_MAX;
 }
 
 int thhv_doorbell_target_vp(unsigned int cpu, u64 *vp)

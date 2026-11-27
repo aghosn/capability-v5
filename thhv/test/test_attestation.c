@@ -30,38 +30,9 @@
 #include <openssl/param_build.h>
 #include <openssl/err.h>
 
-/* ── Mirror definitions from thhv.h ─────────────────────────────────────── */
+#include "thhv.h"
 
-#define THHV_IOCTL_MAGIC  0xB8
-
-struct thhv_attest_self {
-	uint8_t  nonce[32];
-	uint8_t  user_pub_key[32];
-	uint64_t buf_uaddr;
-	uint64_t buf_len;
-	uint64_t report_size;
-};
-
-#define THHV_ATTEST_SELF \
-	_IOWR(THHV_IOCTL_MAGIC, 0x05, struct thhv_attest_self)
-
-/* AttestReport common-base header (40 bytes, matches domcomm.rs). */
-struct attest_report {
-	uint64_t domain_id;
-	uint32_t flags;            /* DOMCOMM_ATTEST_F_* */
-	uint32_t num_vps;
-	uint32_t api_flags;
-	uint32_t nr_mem_caps;
-	uint32_t nr_dom_caps;
-	uint32_t nr_pa_entries;
-	uint16_t chunk_index;
-	uint16_t total_chunks;
-	uint32_t nr_doorbells;
-};
-#define ATTEST_REPORT_SIZE  sizeof(struct attest_report)
-
-#define DOMCOMM_ATTEST_F_SEALED  (1U << 0)
-#define DOMCOMM_ATTEST_F_DOORBELLS (1U << 2)
+#define ATTEST_REPORT_SIZE  sizeof(struct domcomm_attest_report)
 
 /* SignedEnvelope (168 bytes, matches domcomm.rs).
  *
@@ -80,30 +51,13 @@ struct attest_report {
  * Signature scope: SHA-256(common_base || nonce || user_pub_key) —
  * the entire common base (header + cap entries) is bound.
  */
-struct signed_envelope {
-	uint8_t  signature[64];       /* Ed25519 signature */
-	uint8_t  pub_key[32];         /* capavisor Ed25519 pub key */
-	uint8_t  nonce[32];           /* echoed nonce */
-	uint8_t  user_pub_key[32];    /* echoed user pub key */
-	uint16_t tpm_quote_size;
-	uint16_t tpm_sig_size;
-	uint16_t ak_pub_size;
-	uint16_t reserved;
-};
-
-/* Common-base byte sizes (must match domcomm.rs). */
-#define MEM_CAP_ENTRY_SIZE  40
-#define DOM_CAP_ENTRY_SIZE  16
-#define PA_MAP_ENTRY_SIZE   24
-#define DOORBELL_ENTRY_SIZE 40
-
-static size_t common_base_size(const struct attest_report *hdr)
+static size_t common_base_size(const struct domcomm_attest_report *hdr)
 {
 	return ATTEST_REPORT_SIZE
-		+ (size_t)hdr->nr_mem_caps  * MEM_CAP_ENTRY_SIZE
-		+ (size_t)hdr->nr_dom_caps  * DOM_CAP_ENTRY_SIZE
-		+ (size_t)hdr->nr_pa_entries * PA_MAP_ENTRY_SIZE
-		+ (size_t)hdr->nr_doorbells * DOORBELL_ENTRY_SIZE;
+		+ (size_t)hdr->nr_mem_caps  * ATTEST_MEM_CAP_SIZE
+		+ (size_t)hdr->nr_dom_caps  * ATTEST_DOM_CAP_SIZE
+		+ (size_t)hdr->nr_pa_entries * ATTEST_PA_MAP_SIZE
+		+ (size_t)hdr->nr_doorbells * ATTEST_DOORBELL_SIZE;
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -135,7 +89,7 @@ static void hexdump(const char *label, const uint8_t *buf, size_t len)
  * So the "message" for Ed25519 verify is the 32-byte SHA-256 digest.
  */
 static int verify_ed25519(const uint8_t *common_base, size_t common_base_len,
-			   const struct signed_envelope *env)
+			   const struct domcomm_signed_envelope *env)
 {
 	EVP_PKEY *pkey = NULL;
 	EVP_MD_CTX *ctx = NULL;
@@ -149,14 +103,14 @@ static int verify_ed25519(const uint8_t *common_base, size_t common_base_len,
 	if (!sha_ctx) return -1;
 	EVP_DigestInit_ex(sha_ctx, EVP_sha256(), NULL);
 	EVP_DigestUpdate(sha_ctx, common_base, common_base_len);
-	EVP_DigestUpdate(sha_ctx, env->nonce, 32);
-	EVP_DigestUpdate(sha_ctx, env->user_pub_key, 32);
+	EVP_DigestUpdate(sha_ctx, env->nonce, sizeof(env->nonce));
+	EVP_DigestUpdate(sha_ctx, env->user_pub_key, sizeof(env->user_pub_key));
 	EVP_DigestFinal_ex(sha_ctx, digest, &digest_len);
 	EVP_MD_CTX_free(sha_ctx);
 
 	/* Create Ed25519 public key from raw bytes. */
 	pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL,
-					   env->pub_key, 32);
+					   env->pub_key, sizeof(env->pub_key));
 	if (!pkey) {
 		printf("  FAIL: EVP_PKEY_new_raw_public_key failed\n");
 		ERR_print_errors_fp(stdout);
@@ -179,7 +133,7 @@ static int verify_ed25519(const uint8_t *common_base, size_t common_base_len,
 	 * Ed25519 verify: the "message" is the 32-byte SHA-256 digest
 	 * (that's what the capavisor passed to ed25519_dalek::sign).
 	 */
-	if (EVP_DigestVerify(ctx, env->signature, 64,
+	if (EVP_DigestVerify(ctx, env->signature, sizeof(env->signature),
 			     digest, sizeof(digest)) != 1) {
 		printf("  FAIL: Ed25519 signature INVALID\n");
 		hexdump("digest", digest, 32);
@@ -350,13 +304,13 @@ static int test_unsigned(int fd)
 static int test_signed(int fd)
 {
 	struct thhv_attest_self as;
-	struct attest_report *hdr;
-	struct signed_envelope *env;
+	struct domcomm_attest_report *hdr;
+	struct domcomm_signed_envelope *env;
 	uint8_t *buf;
 	size_t base_len;
 	int ret;
-	uint8_t test_nonce[32];
-	uint8_t test_pubkey[32];
+	uint8_t test_nonce[ATTEST_NONCE_SIZE];
+	uint8_t test_pubkey[ATTEST_KEY_SIZE];
 
 	printf("\n=== Test 2: Signed attestation (nonce + user_pub_key) ===\n");
 
@@ -371,13 +325,13 @@ static int test_signed(int fd)
 	as.buf_len = 65536;
 
 	/* Generate test nonce and user pub key. */
-	fill_random(test_nonce, 32);
-	fill_random(test_pubkey, 32);
+	fill_random(test_nonce, sizeof(test_nonce));
+	fill_random(test_pubkey, sizeof(test_pubkey));
 	/* Ensure at least one byte is non-zero (triggers signed path). */
 	test_nonce[0] |= 0x01;
 
-	memcpy(as.nonce, test_nonce, 32);
-	memcpy(as.user_pub_key, test_pubkey, 32);
+	memcpy(as.nonce, test_nonce, sizeof(test_nonce));
+	memcpy(as.user_pub_key, test_pubkey, sizeof(test_pubkey));
 
 	ret = ioctl(fd, THHV_ATTEST_SELF, &as);
 	if (ret < 0) {
@@ -396,9 +350,9 @@ static int test_signed(int fd)
 		return 1;
 	}
 
-	hdr = (struct attest_report *)buf;
+	hdr = (struct domcomm_attest_report *)buf;
 	if (!(hdr->flags & DOMCOMM_ATTEST_F_DOORBELLS) ||
-	    (hdr->flags & (1u << 1))) {
+	    (hdr->flags & DOMCOMM_ATTEST_F_RETIRED_NOTIFICATIONS)) {
 		printf("  FAIL: unsupported attestation format flags %#x\n",
 		       hdr->flags);
 		free(buf);
@@ -418,31 +372,31 @@ static int test_signed(int fd)
 	}
 	printf("  PASS: DOMCOMM_ATTEST_F_SEALED set\n");
 
-	if (as.report_size < base_len + sizeof(struct signed_envelope)) {
+	if (as.report_size < base_len + sizeof(struct domcomm_signed_envelope)) {
 		printf("  FAIL: report too small for common base + envelope (%lu < %zu)\n",
 		       (unsigned long)as.report_size,
-		       base_len + sizeof(struct signed_envelope));
+		       base_len + sizeof(struct domcomm_signed_envelope));
 		free(buf);
 		return 1;
 	}
 
-	env = (struct signed_envelope *)(buf + base_len);
+	env = (struct domcomm_signed_envelope *)(buf + base_len);
 
 	/* Verify nonce is echoed back. */
-	if (memcmp(env->nonce, test_nonce, 32) != 0) {
+	if (memcmp(env->nonce, test_nonce, sizeof(test_nonce)) != 0) {
 		printf("  FAIL: nonce mismatch!\n");
-		hexdump("sent    ", test_nonce, 32);
-		hexdump("received", env->nonce, 32);
+		hexdump("sent    ", test_nonce, sizeof(test_nonce));
+		hexdump("received", env->nonce, sizeof(env->nonce));
 		free(buf);
 		return 1;
 	}
 	printf("  PASS: nonce echoed correctly\n");
 
 	/* Verify user_pub_key is echoed back. */
-	if (memcmp(env->user_pub_key, test_pubkey, 32) != 0) {
+	if (memcmp(env->user_pub_key, test_pubkey, sizeof(test_pubkey)) != 0) {
 		printf("  FAIL: user_pub_key mismatch!\n");
-		hexdump("sent    ", test_pubkey, 32);
-		hexdump("received", env->user_pub_key, 32);
+		hexdump("sent    ", test_pubkey, sizeof(test_pubkey));
+		hexdump("received", env->user_pub_key, sizeof(env->user_pub_key));
 		free(buf);
 		return 1;
 	}
@@ -451,8 +405,8 @@ static int test_signed(int fd)
 	/* Verify Ed25519 signature cryptographically. */
 	printf("  Verifying Ed25519 signature over %zu-byte common base...\n",
 	       base_len);
-	hexdump("signature", env->signature, 64);
-	hexdump("capavisor_pub_key", env->pub_key, 32);
+	hexdump("signature", env->signature, sizeof(env->signature));
+	hexdump("capavisor_pub_key", env->pub_key, sizeof(env->pub_key));
 
 	if (verify_ed25519(buf, base_len, env) != 0) {
 		printf("  FAIL: Ed25519 signature verification failed\n");
@@ -468,7 +422,7 @@ static int test_signed(int fd)
 
 	if (env->tpm_quote_size > 0) {
 		size_t expected_total = base_len
-			+ sizeof(struct signed_envelope)
+			+ sizeof(struct domcomm_signed_envelope)
 			+ env->tpm_quote_size
 			+ env->tpm_sig_size
 			+ env->ak_pub_size;
@@ -483,7 +437,7 @@ static int test_signed(int fd)
 		}
 
 		uint8_t *tpm_quote = buf + base_len
-			+ sizeof(struct signed_envelope);
+			+ sizeof(struct domcomm_signed_envelope);
 		uint8_t *tpm_sig = tpm_quote + env->tpm_quote_size;
 		uint8_t *ak_pub = tpm_sig + env->tpm_sig_size;
 

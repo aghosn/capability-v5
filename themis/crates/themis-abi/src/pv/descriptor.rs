@@ -7,16 +7,48 @@ use super::{
 
 pub const VERSION: u32 = 2;
 pub const FLAG_DEVICE_IO: u32 = 1;
-const MAGIC: u64 = u64::from_le_bytes(*b"THEMISPV");
-const HEADER_SIZE: usize = 64;
-const REGION_SIZE: usize = 64;
-const CHANNEL_SIZE: usize = 96;
-const CHANNEL_START: usize = HEADER_SIZE + MAX_REGIONS * REGION_SIZE;
+pub const MAGIC: u64 = u64::from_le_bytes(*b"THEMISPV");
+
+pub mod layout {
+    pub const HEADER_SIZE: usize = 64;
+    pub const REGION_SIZE: usize = 64;
+    pub const CHANNEL_SIZE: usize = 96;
+    pub const CHANNEL_START: usize = HEADER_SIZE + super::MAX_REGIONS * REGION_SIZE;
+    pub const ID_SIZE: usize = 32;
+
+    pub const DESC_MAGIC: usize = 0;
+    pub const DESC_VERSION: usize = 8;
+    pub const DESC_SIZE: usize = 12;
+    pub const DESC_NUM_VPS: usize = 16;
+    pub const DESC_NUM_REGIONS: usize = 20;
+    pub const DESC_NUM_CHANNELS: usize = 24;
+    pub const DESC_FLAGS: usize = 28;
+    pub const DESC_GENERATION_LO: usize = 32;
+    pub const DESC_GENERATION_HI: usize = 40;
+    pub const DESC_RESERVED: usize = 48;
+
+    pub const REGION_GPA: usize = 32;
+    pub const REGION_LENGTH: usize = 40;
+    pub const REGION_RIGHTS: usize = 48;
+    pub const REGION_RESERVED: usize = 56;
+
+    pub const CHANNEL_CONTROL: usize = 32;
+    pub const CHANNEL_IO: usize = 36;
+    pub const CHANNEL_NUM_VPS: usize = 40;
+    pub const CHANNEL_VERSION: usize = 44;
+    pub const CHANNEL_SERVICES: usize = 48;
+    pub const CHANNEL_RECIPIENT: usize = 56;
+    pub const CHANNEL_PORT: usize = 64;
+    pub const CHANNEL_RESERVED: usize = 72;
+}
+
+use layout::*;
+
 const USED_SIZE: usize = CHANNEL_START + MAX_CHANNELS * CHANNEL_SIZE;
-const ID_SIZE: usize = 32;
 const U32_SIZE: usize = 4;
 const U64_SIZE: usize = 8;
-const KNOWN_SERVICES: u64 = 7;
+pub const KNOWN_SERVICES: u64 =
+    Service::Control.bit() | Service::Platform.bit() | Service::Virtio.bit();
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Identifier([u8; ID_SIZE]);
@@ -212,79 +244,93 @@ impl Descriptor {
 
     pub fn encode(&self, bytes: &mut [u8; PAGE_SIZE]) {
         bytes.fill(0);
-        put64(bytes, 0, MAGIC);
-        put32(bytes, 8, VERSION);
-        put32(bytes, 12, PAGE_SIZE as u32);
-        put32(bytes, 16, self.num_vps);
-        put32(bytes, 20, self.nr_regions as u32);
-        put32(bytes, 24, self.nr_channels as u32);
-        put32(bytes, 28, if self.device_io { FLAG_DEVICE_IO } else { 0 });
-        put64(bytes, 32, self.generation[0]);
-        put64(bytes, 40, self.generation[1]);
+        put64(bytes, DESC_MAGIC, MAGIC);
+        put32(bytes, DESC_VERSION, VERSION);
+        put32(bytes, DESC_SIZE, PAGE_SIZE as u32);
+        put32(bytes, DESC_NUM_VPS, self.num_vps);
+        put32(bytes, DESC_NUM_REGIONS, self.nr_regions as u32);
+        put32(bytes, DESC_NUM_CHANNELS, self.nr_channels as u32);
+        put32(
+            bytes,
+            DESC_FLAGS,
+            if self.device_io { FLAG_DEVICE_IO } else { 0 },
+        );
+        put64(bytes, DESC_GENERATION_LO, self.generation[0]);
+        put64(bytes, DESC_GENERATION_HI, self.generation[1]);
         for (i, region) in self.regions().iter().enumerate() {
             let off = HEADER_SIZE + i * REGION_SIZE;
             bytes[off..off + ID_SIZE].copy_from_slice(&region.id.0);
-            put64(bytes, off + 32, region.gpa);
-            put64(bytes, off + 40, region.size);
-            put64(bytes, off + 48, RIGHTS_RW);
+            put64(bytes, off + REGION_GPA, region.gpa);
+            put64(bytes, off + REGION_LENGTH, region.size);
+            put64(bytes, off + REGION_RIGHTS, RIGHTS_RW);
         }
         for (i, channel) in self.channels().iter().enumerate() {
             let off = CHANNEL_START + i * CHANNEL_SIZE;
             bytes[off..off + ID_SIZE].copy_from_slice(&channel.id.0);
-            put32(bytes, off + 32, channel.control);
-            put32(bytes, off + 36, channel.io);
-            put32(bytes, off + 40, self.num_vps);
-            put32(bytes, off + 44, PROTOCOL_VERSION);
-            put64(bytes, off + 48, channel.services);
-            put64(bytes, off + 56, channel.doorbell_recipient);
-            put64(bytes, off + 64, channel.doorbell_port);
+            put32(bytes, off + CHANNEL_CONTROL, channel.control);
+            put32(bytes, off + CHANNEL_IO, channel.io);
+            put32(bytes, off + CHANNEL_NUM_VPS, self.num_vps);
+            put32(bytes, off + CHANNEL_VERSION, PROTOCOL_VERSION);
+            put64(bytes, off + CHANNEL_SERVICES, channel.services);
+            put64(bytes, off + CHANNEL_RECIPIENT, channel.doorbell_recipient);
+            put64(bytes, off + CHANNEL_PORT, channel.doorbell_port);
         }
     }
 
     pub fn decode(bytes: &[u8; PAGE_SIZE]) -> Result<Self, Error> {
-        if get64(bytes, 0) != MAGIC
-            || get32(bytes, 8) != VERSION
-            || get32(bytes, 12) != PAGE_SIZE as u32
-            || get32(bytes, 28) & !FLAG_DEVICE_IO != 0
-            || bytes[48..HEADER_SIZE].iter().any(|&v| v != 0)
+        if get64(bytes, DESC_MAGIC) != MAGIC
+            || get32(bytes, DESC_VERSION) != VERSION
+            || get32(bytes, DESC_SIZE) != PAGE_SIZE as u32
+            || get32(bytes, DESC_FLAGS) & !FLAG_DEVICE_IO != 0
+            || bytes[DESC_RESERVED..HEADER_SIZE].iter().any(|&v| v != 0)
             || bytes[USED_SIZE..].iter().any(|&v| v != 0)
         {
             return Err(Error::Malformed);
         }
-        let nr_regions = get32(bytes, 20) as usize;
-        let nr_channels = get32(bytes, 24) as usize;
+        let nr_regions = get32(bytes, DESC_NUM_REGIONS) as usize;
+        let nr_channels = get32(bytes, DESC_NUM_CHANNELS) as usize;
         if nr_regions > MAX_REGIONS || nr_channels > MAX_CHANNELS {
             return Err(Error::Bounds);
         }
-        let mut result = Self::new([get64(bytes, 32), get64(bytes, 40)], get32(bytes, 16));
-        result.device_io = get32(bytes, 28) & FLAG_DEVICE_IO != 0;
+        let mut result = Self::new(
+            [
+                get64(bytes, DESC_GENERATION_LO),
+                get64(bytes, DESC_GENERATION_HI),
+            ],
+            get32(bytes, DESC_NUM_VPS),
+        );
+        result.device_io = get32(bytes, DESC_FLAGS) & FLAG_DEVICE_IO != 0;
         for i in 0..nr_regions {
             let off = HEADER_SIZE + i * REGION_SIZE;
-            if get64(bytes, off + 48) != RIGHTS_RW || get64(bytes, off + 56) != 0 {
+            if get64(bytes, off + REGION_RIGHTS) != RIGHTS_RW
+                || get64(bytes, off + REGION_RESERVED) != 0
+            {
                 return Err(Error::Malformed);
             }
             result.push_region(Region {
                 id: Identifier::decode(&bytes[off..off + ID_SIZE])?,
-                gpa: get64(bytes, off + 32),
-                size: get64(bytes, off + 40),
+                gpa: get64(bytes, off + REGION_GPA),
+                size: get64(bytes, off + REGION_LENGTH),
             })?;
         }
         for i in 0..nr_channels {
             let off = CHANNEL_START + i * CHANNEL_SIZE;
-            if get32(bytes, off + 40) != result.num_vps
-                || get32(bytes, off + 44) != PROTOCOL_VERSION
-                || get64(bytes, off + 64) == 0
-                || bytes[off + 72..off + CHANNEL_SIZE].iter().any(|&v| v != 0)
+            if get32(bytes, off + CHANNEL_NUM_VPS) != result.num_vps
+                || get32(bytes, off + CHANNEL_VERSION) != PROTOCOL_VERSION
+                || get64(bytes, off + CHANNEL_PORT) == 0
+                || bytes[off + CHANNEL_RESERVED..off + CHANNEL_SIZE]
+                    .iter()
+                    .any(|&v| v != 0)
             {
                 return Err(Error::Malformed);
             }
             result.push_channel(Channel {
                 id: Identifier::decode(&bytes[off..off + ID_SIZE])?,
-                control: get32(bytes, off + 32),
-                io: get32(bytes, off + 36),
-                services: get64(bytes, off + 48),
-                doorbell_recipient: get64(bytes, off + 56),
-                doorbell_port: get64(bytes, off + 64),
+                control: get32(bytes, off + CHANNEL_CONTROL),
+                io: get32(bytes, off + CHANNEL_IO),
+                services: get64(bytes, off + CHANNEL_SERVICES),
+                doorbell_recipient: get64(bytes, off + CHANNEL_RECIPIENT),
+                doorbell_port: get64(bytes, off + CHANNEL_PORT),
             })?;
         }
         let unused_regions = HEADER_SIZE + nr_regions * REGION_SIZE;
@@ -381,7 +427,7 @@ mod tests {
         let mut bytes = [0; PAGE_SIZE];
         d.encode(&mut bytes);
         assert_eq!(Descriptor::decode(&bytes).unwrap(), d);
-        put32(&mut bytes, 28, FLAG_DEVICE_IO | 2);
+        put32(&mut bytes, DESC_FLAGS, FLAG_DEVICE_IO | 2);
         assert_eq!(Descriptor::decode(&bytes), Err(Error::Malformed));
     }
 
@@ -389,16 +435,16 @@ mod tests {
     fn malformed_counts_reserved_bytes_and_rights_are_rejected() {
         let mut bytes = [0; PAGE_SIZE];
         descriptor().encode(&mut bytes);
-        put32(&mut bytes, 8, 1);
+        put32(&mut bytes, DESC_VERSION, 1);
         assert_eq!(Descriptor::decode(&bytes), Err(Error::Malformed));
         descriptor().encode(&mut bytes);
-        put32(&mut bytes, 20, u32::MAX);
+        put32(&mut bytes, DESC_NUM_REGIONS, u32::MAX);
         assert_eq!(Descriptor::decode(&bytes), Err(Error::Bounds));
         descriptor().encode(&mut bytes);
         bytes[PAGE_SIZE - 1] = 1;
         assert_eq!(Descriptor::decode(&bytes), Err(Error::Malformed));
         descriptor().encode(&mut bytes);
-        put64(&mut bytes, HEADER_SIZE + 48, 7);
+        put64(&mut bytes, HEADER_SIZE + REGION_RIGHTS, 7);
         assert_eq!(Descriptor::decode(&bytes), Err(Error::Malformed));
     }
 

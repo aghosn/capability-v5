@@ -23,9 +23,7 @@
 #include <unistd.h>
 #include <linux/ioctl.h>
 
-/* Local UAPI copy (thhv.h pulls in kernel-only helpers we don't need). */
-#define THHV_IOCTL_MAGIC 0xB8
-#define THHV_DEBUG_REVOKE_ALL _IO(THHV_IOCTL_MAGIC, 0xF2)
+#include "thhv.h"
 
 int main(int argc, char **argv)
 {

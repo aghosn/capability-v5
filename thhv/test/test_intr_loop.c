@@ -53,100 +53,9 @@
 #include <linux/ioctl.h>
 #include <stdint.h>
 
-/* ── Mirror key definitions from thhv.h ────────────────────────────────────── */
+#include "thhv.h"
 
-#define THHV_IOCTL_MAGIC       0xB8
-#define THHV_SCHED_SYNC        0
-#define THHV_META_PAGES_SHARED 3
-#define THHV_META_PAGES_PER_VP 3
-#define THEMIC_MSG_SLOT_SIZE   256
 #define PAGE_SIZE_4K           4096
-
-#define EXIT_REASON_HLT        12
-#define THEMIC_MSG_VP_INTERCEPT 0x0001
-
-#define THHV_MEM_R_READ  (1U << 0)
-#define THHV_MEM_R_WRITE (1U << 1)
-#define THHV_MEM_R_EXEC  (1U << 2)
-
-#define THHV_VP_REG_RIP 0x11
-
-struct thhv_create_partition {
-	uint64_t cores_mask;
-	uint64_t api_flags;
-	uint32_t sched_policy;
-	uint32_t num_vps;
-};
-struct thhv_initialize_partition_meta {
-	uint64_t meta_uaddr;
-	uint64_t meta_size;
-};
-struct thhv_create_vp {
-	uint32_t vp_index;
-	uint32_t rsvd;
-	uint64_t meta_uaddr;
-	uint64_t meta_size;
-	uint64_t comm_uaddr;
-};
-struct thhv_set_guest_memory {
-	uint64_t guest_pfn;
-	uint64_t userspace_addr;
-	uint64_t size;
-	uint32_t flags;
-	uint32_t rights;
-	uint64_t attrs;
-};
-struct thhv_reg_name_value {
-	uint64_t name;
-	uint64_t value;
-};
-struct thhv_vp_registers {
-	uint32_t count;
-	uint32_t rsvd;
-	uint64_t regs;
-};
-struct thhv_run_vp {
-	uint8_t msg_buf[THEMIC_MSG_SLOT_SIZE];
-};
-struct themic_message_header {
-	uint32_t message_type;
-	uint32_t payload_size;
-	uint64_t sequence;
-};
-struct themic_intercept_message {
-	struct themic_message_header header;
-	uint32_t exit_reason;
-	uint32_t instruction_length;
-	uint64_t exit_qualification;
-	uint64_t guest_physical_address;
-	uint64_t guest_rip;
-	uint64_t guest_rflags;
-	uint16_t port_number;
-	uint8_t  access_size;
-	uint8_t  is_write;
-	uint32_t reserved;
-	uint64_t rax;
-	uint8_t  instruction_bytes[16];
-	uint64_t cpuid_rax, cpuid_rcx;
-	uint32_t msr_number;
-	uint32_t rsvd2;
-	uint64_t msr_value;
-};
-
-#define THHV_CREATE_PARTITION \
-	_IOWR(THHV_IOCTL_MAGIC, 0x01, struct thhv_create_partition)
-#define THHV_INITIALIZE_PARTITION \
-	_IO(THHV_IOCTL_MAGIC, 0x10)
-#define THHV_CREATE_VP \
-	_IOWR(THHV_IOCTL_MAGIC, 0x11, struct thhv_create_vp)
-#define THHV_SET_GUEST_MEMORY \
-	_IOW(THHV_IOCTL_MAGIC, 0x12, struct thhv_set_guest_memory)
-#define THHV_SEND_SHARED_META \
-	_IOW(THHV_IOCTL_MAGIC, 0x17, struct thhv_initialize_partition_meta)
-#define THHV_RUN_VP \
-	_IOWR(THHV_IOCTL_MAGIC, 0x20, struct thhv_run_vp)
-#define THHV_SET_VP_STATE \
-	_IOW(THHV_IOCTL_MAGIC, 0x22, struct thhv_vp_registers)
 
 /* ── Helpers ───────────────────────────────────────────────────────────────── */
 
@@ -216,7 +125,7 @@ int main(void)
 	shared_meta = alloc_pages(THHV_META_PAGES_SHARED);
 	if (!shared_meta) FAIL("alloc shared META pages");
 	{
-		struct thhv_initialize_partition_meta ip = {
+		struct thhv_initialize_partition ip = {
 			.meta_uaddr = (uint64_t)(uintptr_t)shared_meta,
 			.meta_size  = THHV_META_PAGES_SHARED * PAGE_SIZE_4K,
 		};
@@ -337,9 +246,9 @@ int main(void)
 		if (msg->header.message_type != THEMIC_MSG_VP_INTERCEPT)
 			FAIL("expected message_type=0x%04x, got 0x%04x",
 			     THEMIC_MSG_VP_INTERCEPT, msg->header.message_type);
-		if (msg->exit_reason != EXIT_REASON_HLT)
+		if (msg->exit_reason != THHV_EXIT_REASON_HLT)
 			FAIL("expected exit_reason=%d (HLT), got %u",
-			     EXIT_REASON_HLT, msg->exit_reason);
+			     THHV_EXIT_REASON_HLT, msg->exit_reason);
 
 		printf("\n  ✓ Child looped and exited via HLT.\n");
 		printf("  ✓ dom0 remains responsive (no RCU stall).\n");

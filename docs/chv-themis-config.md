@@ -10,6 +10,23 @@ PV requires a `comm` channel declaring Control and Platform services.
 CHV binds the selection into the bootstrap descriptor (header flag 1).
 Linux gates its PV device hooks on that flag, not on confidentiality.
 
+Linux builds its boot-time backend into `arch/x86/coco/themis/` with
+`CONFIG_THEMIS_GUEST=y`; it is separate from the loadable `/dev/thhv`
+driver. One early setup entry establishes the channel before early-console
+I/O. Subsequent setup uses Linux's hypervisor registration and APIC callback
+interfaces. The x86 I/O accessors handle PV device registers centrally, so
+virtio and MSI-X use their ordinary Linux accessors. RAM and firmware-table
+access stays local. A registered ACPI SystemMemory handler uses ACPI's
+RAM-aware mapping API and standard I/O accessors instead of modifying the
+interpreter; it must not map private RAM through the shared address window.
+The early DMA initialization, PCI ECAM and deadline-timer hooks remain
+architecture integration points; TDX/SEV's CPU-delivered I/O exceptions are not available
+merely by registering Themis callbacks. Full NMI injection remains separate
+work: neither forwarding an NMI through the fixed-IPI service nor falling
+back to the current legacy CHV path supplies NMI support.
+The current CHV machine and PV backend use one IOAPIC at `0xfec00000`;
+multiple controllers or different addresses require coordinated support.
+
 For multi-VP PV direct boot, CHV also advertises the standard ACPI MADT
 multiprocessor wakeup mailbox. Secondary VPs enter private guest waiting
 code with their initial state set before sealing. Linux supplies each

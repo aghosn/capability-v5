@@ -38,23 +38,7 @@
 #include <inttypes.h>
 #include <linux/ioctl.h>
 
-/* Local copies of UAPI bits we need (thhv.h pulls in kernel-only helpers). */
-#define THHV_IOCTL_MAGIC 0xB8
-
-struct thhv_debug_hpa_range {
-	uint64_t hpa;
-	uint64_t nr_pages;
-};
-
-struct thhv_debug_list_hpas {
-	uint64_t domain_handle;
-	uint32_t max_entries;
-	uint32_t nr_entries;
-	uint64_t entries;
-};
-
-#define THHV_DEBUG_LIST_HPAS \
-	_IOWR(THHV_IOCTL_MAGIC, 0xF1, struct thhv_debug_list_hpas)
+#include "thhv.h"
 
 #define PAGE_SIZE 4096UL
 

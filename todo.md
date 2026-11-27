@@ -7,6 +7,406 @@
 
 ## Current Status
 
+- **Reviewed changes approved for commit (2026-11-27):** Linux generated
+  header follow-up committed as 71857b809a4c on top of 31ae7d6b8619;
+  Linux worktree verified clean. Parent commit includes shared ABI
+  generation/consumers/tests/build checks, Linux integration documentation
+  and this tracker. Existing untracked _2025/ and testing-posted.md are
+  excluded. Validation results below unchanged; no push or new live boot.
+  Next work remains the recorded NMI/interface-unification/dom2 candidates;
+  none is implicitly started by these commits.
+
+- **Completing shared C ABI constants (DONE, 2026-11-27):**
+  User requested fixing remaining duplicates and rechecking all consumers.
+  Expanded Rust exporter for thhv's mirrored hypercall, policy, error,
+  CPUID, register-selector, exit-reason, COMM and attestation-size values.
+  Replaced remaining literal flag/VP-discovery/intercept-offset uses and
+  test-local driver mirrors. Preserved driver-only UAPI/local limits and
+  explicitly marked obsolete feature-bit names as legacy compatibility.
+  Fixed stale test_intr_loop metadata budgets/ioctl structure by consuming
+  the current thhv header; no production ABI values changed.
+  Repository-wide pass also migrated tools/toggle-debug.c's private opcode.
+  Coverage audit PASS: all 28 opcodes, 25 public policy constants, 10 error
+  codes and 71 VP selectors exported; 295 generated definitions with no
+  duplicate consumer macros. All 167 snapshotted pre-existing driver ABI
+  numeric values unchanged; both generated copies identical and current.
+  Validation PASS: 19 ABI unit tests + 2 doc tests; all ten userspace C
+  test binaries compile without warnings; C/Rust layout executable
+  (including signed-envelope size); utility compiles with -Werror;
+  exporter rustfmt, shell syntax and both repositories' diff checks.
+  Full cargo build-bins PASS, including thhv.ko against 6.8.0-136 headers;
+  retains previously seen monitor/workload/compiler-version warnings.
+  Linux bzImage #24 PASS with no compiler warnings/errors.
+  No new live boot or /dev/thhv-dependent test execution.
+  Packaged bins.img and tracked tools/toggle-debug restored and cmp-verified;
+  bins hash remains 09e6f00d...f21bb17. Temporary backup/binary cleanup done.
+  User subsequently approved committing all reviewed changes. Linux
+  generated-header follow-up is 71857b809a4c; parent changes are included
+  with this tracker update. Nothing pushed.
+  Files modified in this follow-up:
+  - themis/crates/themis-abi/examples/export_c_header.rs and
+    thhv/inc/themis_abi.h, ../linux/include/linux/themis_abi.h:
+    expanded Rust-owned definitions and regenerated copies.
+  - themis/crates/themis-abi/src/domcomm.rs: alias duplicate CPUID leaf
+    to canonical cpuid definition (plus earlier test/layout cleanup).
+  - thhv/inc/thhv.h: consume generated constants, retain HC aliases and
+    driver-only definitions; name attestation field lengths.
+  - thhv/src/{thhv_doorbell_irq.c,thhv_translate.c,thhv_vp.c,
+    thhv_internal.h}: use shared discovery/flag/COMM constants.
+  - thhv/test/{test_attestation.c,test_child_hlt.c,test_coco_attacker.c,
+    test_debug_revoke_all.c,test_intr_loop.c,thhv_test.c,test_abi_layout.c}:
+    remove private ABI copies/literals and validate signed-envelope size.
+  - tools/toggle-debug.c: use generated hypercall opcode.
+  - docs/building.md and todo.md: document coverage and validation.
+
+- **Linux review committed (2026-11-27):** All thirty reviewed Linux paths
+  committed in ../linux as 31ae7d6b8619
+  (x86/themis: consolidate PV platform and device I/O support).
+  Staged diff --check passed; post-commit Linux worktree is clean.
+  Prior final-source kernel #23 build and full build-bins passed; no
+  additional build or boot performed for this commit. Nothing pushed.
+  Returned to capability-v5 ABI/source/build/test/documentation review,
+  starting with themis/crates/themis-abi/src/pv/descriptor.rs; parent
+  changes remain uncommitted. NMI support remains a separate follow-up.
+
+- [ ] **Post-commit: capability-mediated NMI support (PENDING):** User
+  explicitly requested this follow-up after the reviewed commit.
+  Agree the injection/authority contract before implementation across
+  Linux, CHV, thhv and the monitor. Deliver real NMIs, not fixed vector 2;
+  handle pending/NMI-blocked state and NMI-window injection. Current
+  x2APIC PV IPI service accepts fixed delivery only; native fallback
+  does not supply missing NMI semantics. Also address NMI-context use
+  of the shared transport (currently rejected), including console/debug
+  output. Test cross-CPU backtraces, blocked/repeated delivery and teardown,
+  explicitly exercising x2APIC. Previous boot tests did not cover this.
+  No NMI implementation included in the current commit scope.
+
+- **Linux PV readability cleanup (DONE; pv.c STAGED):** User requested replacing
+  hardcoded protocol indices and values in ../linux/arch/x86/coco/themis/pv.c.
+  Implemented named descriptor, DomainComm/attestation and request/completion
+  fields, sizes, services and operations, preserving wire format and behavior.
+  User approved bringing forward shared C-header generation: Rust owns the
+  definitions, thhv and Linux consume checked-in auto-generated copies.
+  Ordinary Linux builds need neither Rust nor the parent checkout; parent
+  kernel/driver build helpers check freshness. Rust descriptor/record code
+  uses the same exported layout constants; attestation offsets/sizes are
+  derived from Rust repr(C) types. Existing thhv constant duplicates removed.
+  Validation PASS: 19 ABI tests + 2 doc tests; C/Rust layout and wide-mask
+  checks; all userspace test binaries compile; matching header copies;
+  stale-header rejection; shell syntax, focused rustfmt and diff checks.
+  Final-source kernel bzImage #23 and full build-bins PASS, including
+  thhv.ko against the pinned 6.8.0-136 headers. Kernel has no compiler
+  warnings/errors; production build retains existing monitor/workload and
+  kernel compiler-version warnings. No new boots for this wire-preserving
+  cleanup; previous live evidence remains recorded below.
+  PV checkpatch: zero errors, four existing volatile I/O-pointer warnings.
+  pv.c approved and staged at user request; staged diff --check passes.
+  Other cleanup edits remain unstaged; earlier staging preserved.
+  Packaged bins.img and toggle-debug restored and cmp-verified; bins hash
+  remains 09e6f00d...f21bb17. Temporary backups/stale-header probe removed.
+  Parent index empty; previous twelve staged Linux files unchanged, with
+  the hcall header's new generated-include migration deliberately unstaged.
+  Next file presented: ../linux/include/linux/themis_abi.h. Generated
+  constants/offsets match the driver copy and preserve integer widths;
+  marked auto-generated with regeneration/check commands. Linux builds
+  independently of Rust. Header approved and staged at user request;
+  staged diff --check passes. Next: the unstaged follow-up in
+  arch/x86/include/asm/themis_hcall.h, replacing three local opcode
+  definitions with the generated header include; wrappers unchanged.
+  Follow-up approved and staged; staged diff --check passes.
+  Next file presented: arch/x86/include/asm/io.h. Routes scalar/string
+  PIO and selected ioremap-backed MMIO through PV when enabled; standard,
+  relaxed and raw MMIO accessors share the hook. Native paths and
+  disabled-config stubs remain; decompressor shared accessors unchanged.
+  Tradeoff: runtime checks in common kernel accessors when support is
+  compiled in; arbitrary assembly/direct pointer accesses are not covered.
+  io.h approved and staged; staged diff --check passes.
+  Next file: arch/x86/kernel/io_delay.c. Replaces raw OUT assembly for
+  delay ports 0x80/0xed with outb(0, port), reusing common PV/native
+  routing and avoiding unspecified AL contents. No recursion: ordinary
+  outb does not invoke slow_down_io. Existing udelay/none choices remain.
+  io_delay.c approved and staged; staged diff --check passes.
+  Next file: arch/x86/pci/mmconfig_64.c. Adds selected PV ECAM reads/
+  writes because mmio_config_* uses dedicated assembly, bypassing normal
+  readl/writel hooks. Native path preserved; both PV returns release the
+  existing RCU read lock. mmconfig_64.c approved and staged; staged
+  diff --check passes. Next file: arch/x86/include/asm/x86_init.h.
+  Extends existing x86_apic_ops read callback with write, EOI and sync
+  callbacks. Checked native defaults, wrappers and PV installation;
+  declarations are generic, not Themis-specific. Header approved and
+  staged; staged diff --check passes.
+  Next file: arch/x86/kernel/x86_init.c. Initializes the three new
+  IOAPIC callbacks to native implementations, preserving the normal
+  path unless a platform explicitly overrides them. Approved and staged;
+  staged diff --check passes.
+  Next file: arch/x86/include/asm/io_apic.h. Declares the native write,
+  EOI and sync functions; supplies NULL aliases when IOAPIC support is
+  disabled, following the existing read/restore pattern. Approved and
+  staged; staged diff --check passes.
+  Next file: arch/x86/kernel/apic/io_apic.c. Retains hardware access in
+  native_* functions and routes write/EOI/sync wrappers through callbacks.
+  Existing IOAPIC locking and register ordering remain. Dedicated hooks
+  cover fixed-mapped IOAPIC accesses, not ordinary ioremap device mappings.
+  Approved and staged; staged diff --check passes.
+  Next file: arch/x86/include/asm/apic.h. Routes x2APIC ICR writes
+  through the PV IPI service when enabled, otherwise retaining WRMSR.
+  Explicitly resurfaced the deferred NMI mismatch: Linux NMI requests
+  use this path but CHV accepts fixed delivery only, so they fail.
+  Approved and staged; staged diff --check passes. NMI follow-up added
+  above at user request; no NMI design change.
+  Next file: arch/x86/kernel/apic/apic.c. Adds one TSC-deadline helper
+  used for both arming and shutdown. PV routes through the shared
+  transport; other configurations retain native WRMSR. Existing deadline
+  calculation and fence stay in place. Approved and staged; staged
+  diff --check passes.
+  Next file: arch/x86/kernel/pci-dma.c. Selects the already-reserved PV
+  shared DMA pool, marks SWIOTLB enabled and skips ordinary pool/IOMMU
+  discovery only when PV initialization succeeds. Other guests retain
+  the old path. Approved and staged; staged diff --check passes.
+  Next file: include/linux/swiotlb.h. Declares reserved-pool initialization
+  and restricted-default-pool detection; exposes existing pool allocation
+  helpers under SWIOTLB rather than only DMA_RESTRICTED_POOL. Adds a NULL
+  guard to the per-device for_alloc check and disabled-config false stub.
+  Checked implementations/users; header approved and staged; staged
+  diff --check passes.
+  Next file: kernel/dma/swiotlb.c. Initializes the default allocator from
+  an already-reserved region, validates bounds/alignment, forces bouncing
+  and enables allocations from that pool. Disables dynamic growth so DMA
+  stays within the reserved region. Existing alloc/free implementations
+  become available without DMA_RESTRICTED_POOL; its device-tree setup
+  remains conditional. Reviewed setup/allocator context; approved and
+  staged; staged diff --check passes.
+  Next file: kernel/dma/direct.c. Skips per-allocation decrypt/re-encrypt
+  operations for devices allocating from SWIOTLB pools, whose shared
+  memory state is managed at pool level. Ordinary allocations retain
+  existing transitions. Checked allocation/free context; approved and
+  staged; staged diff --check passes.
+  Next file: kernel/dma/pool.c. Skips ordinary atomic DMA pool creation
+  when the default SWIOTLB pool is restricted; direct DMA already routes
+  nonblocking allocations for those devices through SWIOTLB instead.
+  Other systems retain existing initialization. Approved and staged;
+  staged diff --check passes.
+  Next file: drivers/virtio/virtio_pci_common.h. Removes the extra
+  Themis-only notify mapping field used by the retired GPA-doorbell
+  workaround. Checked its paired removal in virtio_pci_modern.c; normal
+  vq->priv mapping/cleanup is restored there. Header approved and staged;
+  staged diff --check passes.
+  Next file: drivers/virtio/virtio_pci_modern.c. Removes the retired
+  Themis GPA-doorbell callbacks and special mapping/cleanup. Restores
+  ordinary virtio notification writes, now handled by common MMIO PV
+  routing when active. Notification-data feature selection remains.
+  Checked queue setup/teardown; approved and staged. All thirty changed
+  Linux paths are now staged, no unstaged/untracked Linux changes;
+  staged diff --check passes. No commit.
+  Parent ABI cleanup review begins with
+  themis/crates/themis-abi/src/pv/descriptor.rs: names existing wire
+  offsets/sizes, uses them in encode/decode, and exposes constants for
+  C-header generation. Known service mask derived from enum bits.
+  Layout, protocol version and validation behavior unchanged. Unstaged.
+  Follow-up consistency audit at user request: production descriptor
+  encode/decode, request/completion paths, Linux consumers and migrated
+  thhv definitions use the shared constants; generated-copy freshness
+  check passes. Migration is not exhaustive in tests: pv.rs still uses
+  numeric word indices in three corruption tests; descriptor.rs retains
+  numeric offsets in malformed-input tests; domcomm.rs builds raw numeric
+  test fixtures; thhv/test/test_attestation.c still duplicates attestation
+  flag definitions. Fixed at user request: PV tests use named indices
+  and descriptor offsets; DomainComm fixtures derive sizes/offsets from
+  Rust structs and explicitly name synchronous doorbell kind. C attestation
+  test includes the generated header for flags/entry sizes and asserts
+  its report-header size matches the generated ABI.
+  Validation PASS: 19 ABI unit tests + 2 doc tests, userspace test builds,
+  C/Rust layout executable, both generated-header freshness checks and
+  diff --check. rustfmt reports only the same four pre-existing descriptor
+  formatting differences confirmed against HEAD; left unrelated lines
+  untouched. Linux stays clean. Four test-bearing files modified for this
+  follow-up: src/{pv.rs,pv/descriptor.rs,domcomm.rs} in themis-abi and
+  thhv/test/test_attestation.c. No staging/commit of parent changes.
+  Broader thhv audit found further omissions (now fixed; see top entry): retired
+  notification flag remains numeric in thhv/src/thhv_translate.c:638
+  and thhv/test/test_attestation.c:397; VP discovery still hardcodes the
+  PV CPUID leaf/subleaf/version in thhv/src/thhv_doorbell_irq.c:178-180.
+  These already have generated constants. Previous consistency claim
+  was too broad. Separately, thhv.h still maintains other hypercall,
+  policy-kind, error and CPUID values locally; exporter currently only
+  covers the selected subset, not the entire ABI.
+  No commit.
+  Files modified/created:
+  - themis/crates/themis-abi/src/{pv.rs,pv/descriptor.rs,domcomm.rs}:
+    authoritative named layout/constants, unchanged protocol behavior.
+  - themis/crates/themis-abi/examples/export_c_header.rs and
+    themis/scripts/generate-abi-header.sh: reproducible exporter/checker.
+  - thhv/inc/{themis_abi.h,thhv.h}: generated definitions and consumer.
+  - thhv/{Makefile,test/test_abi_layout.c}: freshness/dependency and
+    cross-language layout checks.
+  - ../linux/{include/linux/themis_abi.h,arch/x86/coco/themis/pv.c,
+    arch/x86/include/asm/themis_hcall.h}: generated copy and named consumers.
+  - themis/scripts/build-kernel.sh: check both copies before parent build.
+  - docs/building.md and todo.md: regeneration instructions and handoff.
+
+- **Post-commit candidate: unify guest hypercall interfaces (PENDING):**
+  User wants one shared implementation rather than parallel Rust/C
+  interfaces. Reconcile themis/crates/libthemis/src/{lib,ffi}.rs with the
+  current ABI and use a common interface from built-in Linux support and
+  thhv where practical. thhv/Makefile still builds the Rust archive,
+  but thhv/Kbuild does not link it; the FFI attestation wrapper exposes
+  the old interface while current C wrappers use chunked reports.
+  Current Linux wrappers accepted temporarily. Shared constants/header
+  generation brought forward into the PV cleanup above; wrapper/FFI
+  implementation unification is still pending. Consider that or dom2
+  boot as the next work after the reviewed commit; neither started.
+
+- **Linux file-by-file review (2026-11-27, IN PROGRESS):** User requested
+  an interactive review led by the agent. Order: configuration/platform
+  setup, I/O, interrupts, DMA, then documentation. First file examined:
+  ../linux/arch/x86/Kconfig. Added SWIOTLB selection is needed for the
+  reserved shared DMA pool in non-confidential PV mode too; updated help
+  replaces the retired address-matched notification description. No
+  functional issue found in this file's diff. Kconfig staged at user
+  request; staged diff --check passes and no other Linux file is staged.
+  Next file examined: ../linux/arch/x86/coco/themis/platform.c, including
+  build/registration wiring and ACPI mapping/init ordering. Consolidates
+  early detection/channel setup, normal hypervisor callbacks, APIC timer
+  configuration publication and ACPI SystemMemory handling. RAM-aware
+  mapping preserves private RAM; no new functional issue found in this
+  read-through. platform.c staged at user request; staged diff --check
+  passes. Only Kconfig and the new platform.c are staged; old platform
+  file deletion and build/registration wiring await their review.
+  Next file examined: ../linux/arch/x86/kernel/setup.c. Moves the single
+  platform bootstrap after early mapping/static-call initialization and
+  before early console parsing; removes the later bootstrap and separate
+  CoCo call now owned by platform.c. Checked initialization dependencies;
+  DMA reservation remains in the normal hypervisor callback. No issue
+  found in this diff. User agreed to retain initialization here rather
+  than split detection into head64.c; setup.c staged at user request.
+  Staged diff --check passes; staged files are Kconfig, platform.c and
+  setup.c. Next file: arch/x86/coco/Makefile, adding the Themis backend
+  under CONFIG_THEMIS_GUEST (not limited to confidential guests).
+  No functional issue found; coco/Makefile staged at user request.
+  Staged diff --check passes. Next file: coco/themis/Makefile, building
+  platform.o and pv.o into the selected backend. No issue found; this
+  new Makefile staged at user request; staged diff --check passes.
+  Next file: arch/x86/kernel/cpu/Makefile, removing the old
+  themis_platform.o build entry now replaced by coco/themis/platform.o.
+  No issue found; CPU Makefile staged at user request; staged diff
+  --check passes. Next file: deletion of
+  arch/x86/kernel/cpu/themis_platform.c. Its detection, feature state
+  and exported query helpers are preserved in the reviewed new
+  coco/themis/platform.c. No functionality lost; deletion remains
+  staged at user request; staged diff --check passes.
+  Next file: arch/x86/include/asm/hypervisor.h. Appends the internal
+  X86_HYPER_THEMIS enum value and declares x86_hyper_themis, matching
+  the existing hypervisor registration pattern. No issue found;
+  header staged at user request; staged diff --check passes.
+  Next file: arch/x86/kernel/cpu/hypervisor.c. Adds x86_hyper_themis
+  to the detection table under CONFIG_THEMIS_GUEST, following existing
+  entries. No issue found; hypervisor.c staged at user request and
+  staged diff --check passes.
+  Next file: arch/x86/include/asm/themis_platform.h. Corrects CPUID
+  signature ECX bytes, updates feature bits to match themis-abi, and
+  declares backend operations with disabled-config stubs where needed.
+  Checked guarded PIO/IPI/deadline consumers. Existing signature comment
+  incorrectly said NUL padding; corrected to two spaces at user request
+  to match the actual ABI. Header staged at user request; staged diff
+  --check passes.
+  Next file: arch/x86/include/asm/themis_hcall.h. Replaces retired
+  address-matched notification with held-capability NOTIFY, adds return
+  to caller via SWITCH(0), and unsigned self-attestation chunk requests.
+  Checked opcodes, argument/result registers and scratch clobbers against
+  the ABI, thhv and monitor attestation handler. No functional issue
+  found in this diff; hypercall header staged at user request with
+  interface unification deferred as recorded above. Staged diff --check
+  passes. Next file: arch/x86/include/asm/fixmap.h. Reserves 256 permanent
+  virtual mapping slots for per-VP shared control pages under
+  CONFIG_THEMIS_GUEST; descriptor parser caps VP count at 256. No issue
+  found in this diff; fixmap.h staged following user clarification that
+  their "ok" approved staging. Staged diff --check passes.
+  Explained how the per-VP mappings back synchronous requests.
+  Next file: arch/x86/coco/themis/pv.c. Read the full implementation:
+  descriptor validation, held-doorbell discovery, ordered per-VP request/
+  completion exchange, device/interrupt adapters and reserved shared DMA.
+  Compared record layout, ordering and platform opcodes with themis-abi.
+  Protocol mirroring belongs in the deferred interface-unification work;
+  single IOAPIC and missing NMI support remain documented limitations.
+  pv.c remains unstaged pending user review.
+  Files modified for this correction:
+  ../linux/arch/x86/include/asm/themis_platform.h (signature comment only);
+  todo.md (review progress).
+  Present the next file automatically after each staging approval.
+  No kernel source edits or commits.
+  Files modified: todo.md (review progress only).
+
+- **Linux backend cleanup (DONE; UNSTAGED):** Consolidated boot support in
+  ../linux/arch/x86/coco/themis/{platform,pv}.c. One early setup entry
+  establishes the shared channel before early-console I/O; normal x86
+  hypervisor registration handles later DMA reservation and APIC write
+  override. Central x86 MMIO accessors replace branded virtio/MSI wrappers,
+  preserving local RAM/firmware access. Registered ACPI SystemMemory
+  handling replaces ACPICA/interpreter and OS-specific branches. thhv
+  remains loadable; no capability, CHV or monitor source changes.
+  The new AML runtime probe initially caught a handler regression:
+  acpi_os_read/write_memory can ioremap private RAM through the shared
+  window (failed #20 confidential probe at canonical GPA 0x120cf000).
+  Fixed with RAM-aware acpi_os_map_iomem/unmap_iomem, acpi_os_read_iomem
+  and normal write accessors. The same probe now passes confidentially;
+  this was not established to be the previously recorded RAM-mapping bug.
+  Final validation PASS: matching kernel bzImage #21; backend checkpatch;
+  parent/Linux diff --check; three fresh-monitor cycles with existing dom0
+  (four CPUs) and confidential, non-confidential PV, and legacy dom1 (two
+  CPUs each), all with seccomp enabled. SSH, disk R/W, networking, IRQ/HLT,
+  repeated Sync child teardown, signed attestation, COMM growth/reload and
+  parent post-child cleanup pass (standard aliased guest skips exclusive
+  growth). Both PV modes pass reserved shared DMA checks. Session-only
+  probes pass RAM 8/16/32/64-bit and relaxed accessors, PCI MMIO, AML
+  RAM/device fields, and accessors compiled with Themis disabled. Matching
+  module imports checked; no kernel/monitor BUG, CPU WARNING, Oops/panic or
+  VMM ERROR signatures in final logs. No dom2 or full NMI support claimed;
+  NMI injection/API design remains explicitly separate by user choice.
+  Owned VMs/helpers stopped; isolated dom0/bins/OVMF disks removed. Original
+  bins.img unchanged, SHA256 09e6f00d...f21bb17. Nothing staged/committed.
+  Logs: /tmp/linux-backend-cleanup-{build-final,probe-link,final-live-boots}.log
+  and /tmp/linux-backend-cleanup-final-{confidential,pv,standard}-live-*.
+  Reusable session probes/runners: session files/thhv-live/backend-probe/
+  and kernel-cleanup-boots.py. Next: review the cleaned Linux diff; NMI
+  work needs an agreed capability-mediated injection API, not native
+  fallback or silently substituting fixed interrupts.
+  Files modified: ../linux/arch/x86/{coco/themis/,coco/Makefile,
+  include/asm/{io,apic,hypervisor,themis_platform}.h,kernel/{setup,io_delay}.c,
+  kernel/cpu/{Makefile,hypervisor.c,themis_platform.c,themis_pv.c},
+  pci/mmconfig_64.c} (backend relocation, callbacks and central accessors);
+  drivers/acpi/{osl.c,acpica/exregion.c}, drivers/pci/msi/{msi.c,msi.h},
+  drivers/virtio/{virtio_pci_common.c,virtio_pci_modern.c} and
+  include/linux/virtio_pci_modern.h (restore generic accessors/interpreter;
+  preserve old virtio workaround deletion); include/linux/themis_io.h
+  removed (no branded wrappers needed).
+  docs/chv-themis-config.md (integration boundary/limitations);
+  todo.md (scope/results).
+
+- **Linux integration review (DONE; kernel read-only):** Read all 29 tracked
+  modified files and the new themis_pv.c/themis_io.h; followed early setup,
+  device I/O, interrupt and shared-DMA paths. Confirmed correctness issue:
+  arch/x86/include/asm/apic.h:234 routes every x2APIC ICR write through PV,
+  including NMI backtraces (arch/x86/kernel/apic/hw_nmi.c:34 and local.h:38),
+  but CHV hypervisor/src/themis/pv.rs:391 accepts only fixed interrupts.
+  The rejected completion panics in themis_pv.c:319. This alternate x2APIC
+  path was not exercised by the previous successful boots.
+  Recommendation: consolidate support in a built-in Themis backend, reuse
+  x86_init.hyper, x86_platform.guest, CPU/APIC and PCI operations where
+  suitable, and minimize branded checks in generic virtio/MSI/ACPICA code.
+  Ordinary built-in driver init still follows the earliest platform work;
+  automatically loading thhv.ko cannot replace early hooks. TDX/SEV are
+  useful precedents, but their #VE/#VC I/O handlers require corresponding
+  CPU exception delivery, not merely registering a generic callback.
+  Current IOAPIC support also explicitly assumes one controller at
+  0xfec00000; preserve/document that machine contract or generalize it.
+  DMA review found no additional confirmed defect in the reserved-pool
+  lifecycle or atomic coherent-allocation path. Earlier matching-kernel
+  build and standard/confidential boots remain the runtime evidence;
+  no new build/boot during this read-only review. Linux HEAD/index and
+  tracked diff SHA256 68990de8...e20 unchanged; nothing staged.
+  Next: agree the cleanup scope before modifying Linux; dom2 deferred.
+  Files modified: todo.md (review findings and architectural handoff only).
+
 - **Parent review checkpoint (DONE):** Included this final handoff with the
   reviewed engine, CLI, capavisor, driver, ABI, policies, workloads and docs,
   plus CHV pinned at ef73ea57b. Validation results are recorded below.

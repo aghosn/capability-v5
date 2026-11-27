@@ -37,7 +37,7 @@ static void thhv_read_intercept_msg(struct thhv_vp *vp,
 	memset(msg, 0, sizeof(*msg));
 
 	/* Read slim intercept from COMM page offset 512. */
-	memcpy(&slim, (u8 *)vp->comm_kaddr + 512, sizeof(slim));
+	memcpy(&slim, (u8 *)vp->comm_kaddr + VP_COMM_INTERCEPT_OFFSET, sizeof(slim));
 
 	/* Copy exit metadata. */
 	msg->header              = slim.header;

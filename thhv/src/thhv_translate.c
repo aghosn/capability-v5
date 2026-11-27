@@ -635,7 +635,7 @@ int thhv_pa_map_init_from_attestation(void)
 			+ (size_t)report->nr_pa_entries * sizeof(struct domcomm_pa_map_entry)
 			+ (size_t)report->nr_doorbells * sizeof(struct domcomm_doorbell_entry);
 		if (!(report->flags & DOMCOMM_ATTEST_F_DOORBELLS) ||
-		    (report->flags & (1U << 1))) {
+		    (report->flags & DOMCOMM_ATTEST_F_RETIRED_NOTIFICATIONS)) {
 			ret = -EPROTO;
 			goto out_free;
 		}

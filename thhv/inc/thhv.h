@@ -16,6 +16,7 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
+#include "themis_abi.h"
 
 /* ── THHV ioctl magic ──────────────────────────────────────────────────────── */
 
@@ -23,19 +24,12 @@
 
 /* ── CPUID detection ───────────────────────────────────────────────────────── */
 
-#define THHV_CPUID_LEAF       0x40000000
-#define THHV_CPUID_MAX_LEAF   0x40000003
-#define THHV_CPUID_FEAT_LEAF  0x40000001
-#define THHV_CPUID_DOMCOMM_LEAF 0x40000002  /* DomainComm discovery (EAX:EBX=GPA, ECX=nr_pages) */
-#define THHV_CPUID_CAP_LEAF   0x40000003
+#define THHV_CPUID_MAX_LEAF   THHV_CPUID_CAP_LEAF
+#define THHV_CPUID_DOMCOMM_LEAF DOMCOMM_LEAF /* EAX:EBX=GPA, ECX=nr_pages */
 
-/* Expected vendor string: "ThemisCapa" in EBX:ECX:EDX (little-endian u32s). */
-#define THHV_SIG_EBX  0x6d656854  /* "Them" */
-#define THHV_SIG_ECX  0x61437369  /* "isCa" */
-#define THHV_SIG_EDX  0x20206170  /* "pa  " */
-
-/* Feature flags (leaf 0x40000001, EAX). */
-#define THHV_FEAT_SYNC_SCHED   (1U << 0)
+/* Legacy names retained for UAPI compatibility, not current CPUID features.
+ * Current feature definitions come from the generated header.
+ */
 #define THHV_FEAT_ASYNC_SCHED  (1U << 1)
 #define THHV_FEAT_META_PAGES   (1U << 2)
 #define THHV_FEAT_THEMIC       (1U << 3)
@@ -53,7 +47,7 @@
  * (single source of truth on the Rust side).  Enforced both here (thhv
  * partition-create ioctl) and on the userspace VMM side (CHV
  * `Hypervisor::get_max_vcpus`). */
-#define THHV_MAX_VPS_PER_DOMAIN  256u
+#define THHV_MAX_VPS_PER_DOMAIN  THEMIS_MAX_VPS_PER_DOMAIN
 
 /* Maximum GSI / interrupt vector number.  Intel x86 IDT vectors are 8-bit
  * (0..255); GSI 0 is reserved as "no vector" / invalid. */
@@ -65,98 +59,31 @@
 
 /* ── Themis hypercall opcodes (RAX) ────────────────────────────────────────── */
 
-#define THEMIS_HC_CARVE              0x01
-#define THEMIS_HC_ALIAS              0x02
-#define THEMIS_HC_SEND               0x03
-#define THEMIS_HC_ACCEPT             0x04
-#define THEMIS_HC_REJECT             0x05
-#define THEMIS_HC_CREATE_DOMAIN      0x06
-#define THEMIS_HC_SEAL               0x07
-#define THEMIS_HC_REVOKE             0x08
-#define THEMIS_HC_SWITCH             0x0A
-#define THEMIS_HC_GET_CHAN            0x0B
-#define THEMIS_HC_ATTEST_SELF        0x0C
-#define THEMIS_HC_ATTEST             0x0D
-#define THEMIS_HC_GET_REG            0x0E
-#define THEMIS_HC_SET_REG            0x0F
-#define THEMIS_HC_ASSIGN_DEVICE      0x12
-#define THEMIS_HC_ENUMERATE          0x13
-#define THEMIS_HC_ADD_VP             0x14
-#define THEMIS_HC_REGISTER_COMM      0x18
-#define THEMIS_HC_INJECT_INTERRUPT   0x1b
-#define THEMIS_HC_READ_PCR           0x1e
-#define THEMIS_HC_MAP_SELF           0x1f
-#define THEMIS_HC_SET_POLICY        0x22
+#define THEMIS_HC_CARVE              THEMIS_OP_CARVE
+#define THEMIS_HC_ALIAS              THEMIS_OP_ALIAS
+#define THEMIS_HC_SEND               THEMIS_OP_SEND
+#define THEMIS_HC_ACCEPT             THEMIS_OP_ACCEPT
+#define THEMIS_HC_REJECT             THEMIS_OP_REJECT
+#define THEMIS_HC_CREATE_DOMAIN      THEMIS_OP_CREATE_DOMAIN
+#define THEMIS_HC_SEAL               THEMIS_OP_SEAL
+#define THEMIS_HC_REVOKE             THEMIS_OP_REVOKE
+#define THEMIS_HC_SWITCH             THEMIS_OP_SWITCH
+#define THEMIS_HC_GET_CHAN           THEMIS_OP_GET_CHAN
+#define THEMIS_HC_ATTEST_SELF        THEMIS_OP_ATTEST_SELF
+#define THEMIS_HC_ATTEST             THEMIS_OP_ATTEST
+#define THEMIS_HC_GET_REG            THEMIS_OP_GET_REG
+#define THEMIS_HC_SET_REG            THEMIS_OP_SET_REG
+#define THEMIS_HC_ASSIGN_DEVICE      THEMIS_OP_ASSIGN_DEVICE
+#define THEMIS_HC_ENUMERATE          THEMIS_OP_ENUMERATE
+#define THEMIS_HC_ADD_VP             THEMIS_OP_ADD_VP
+#define THEMIS_HC_REGISTER_COMM      THEMIS_OP_REGISTER_COMM
+#define THEMIS_HC_INJECT_INTERRUPT   THEMIS_OP_INJECT_INTERRUPT
+#define THEMIS_HC_READ_PCR           THEMIS_OP_READ_PCR
+#define THEMIS_HC_MAP_SELF           THEMIS_OP_MAP_SELF
+#define THEMIS_HC_SET_POLICY         THEMIS_OP_SET_POLICY
 
-/* ── Themis hypercall opcodes (RAX in) ─────────────────────────────────────── */
-
-#define THEMIS_OP_CARVE               0x01
-#define THEMIS_OP_ALIAS               0x02
-#define THEMIS_OP_SEND                0x03
-#define THEMIS_SEND_IDENTITY_MAP      ((u64)-1)
-#define THEMIS_OP_ACCEPT              0x04
-#define THEMIS_OP_REJECT              0x05
-#define THEMIS_OP_CREATE_DOMAIN       0x06
-#define THEMIS_OP_SEAL                0x07
-#define THEMIS_OP_REVOKE              0x08
-#define THEMIS_OP_SWITCH              0x0A
-#define THEMIS_OP_GET_CHAN             0x0B
-#define THEMIS_OP_ATTEST_SELF         0x0C
-#define THEMIS_OP_ATTEST              0x0D
-#define THEMIS_OP_GET_REG             0x0E
-#define THEMIS_OP_SET_REG             0x0F
-#define THEMIS_OP_ASSIGN_DEVICE       0x12
-#define THEMIS_OP_ENUMERATE           0x13
-#define THEMIS_OP_ADD_VP              0x14
-#define THEMIS_OP_REGISTER_COMM       0x18
-#define THEMIS_OP_DOMCOMM_NOTIFY     0x19
-#define THEMIS_OP_INJECT_INTERRUPT   0x1b
-#define THEMIS_OP_TOGGLE_DEBUG      0x1d
-#define THEMIS_OP_READ_PCR          0x1e
-#define THEMIS_OP_MAP_SELF          0x1f
-#define THEMIS_OP_SET_POLICY      0x22
-#define THEMIS_OP_CREATE_DOORBELL 0x24
-#define THEMIS_OP_NOTIFY          0x25
+#define THEMIS_SEND_IDENTITY_MAP  (~0ULL)
 #define THEMIS_CAP_SELF           (~0ULL)
-#define THEMIS_DOORBELL_SYNC      0
-#define THEMIS_DOORBELL_ASYNC     1
-
-/* ── Policy-kind discriminants for THEMIS_OP_SET_POLICY ────────────────────── */
-
-#define THEMIS_POLICY_CORES                    0
-#define THEMIS_POLICY_API_MONITOR              1
-#define THEMIS_POLICY_DEFAULT_INTR_VISIBILITY  2
-#define THEMIS_POLICY_VECTOR_VISIBILITY        3
-#define THEMIS_POLICY_VECTOR_REG_READ_SET      4
-#define THEMIS_POLICY_VECTOR_REG_WRITE_SET     5
-#define THEMIS_POLICY_DEFAULT_EXIT_TRAP        6
-#define THEMIS_POLICY_EXIT_REASON_TRAP         7
-#define THEMIS_POLICY_EXIT_REASON_REG_READ_SET 8
-#define THEMIS_POLICY_EXIT_REASON_REG_WRITE_SET 9
-/* CPUID/MSR interposition kinds 10-15 are defined in themis_abi::policy_kind
- * (Rust) but intentionally not mirrored here — thhv passes kind/key/sub_key/
- * value through to themis_set_policy() opaquely (see THHV_SET_POLICY below).
- */
-#define THEMIS_POLICY_VECTOR_INJECTABLE        16
-#define THEMIS_POLICY_DEFAULT_INTR_REG_READ_SET 17
-#define THEMIS_POLICY_DEFAULT_INTR_REG_WRITE_SET 18
-#define THEMIS_POLICY_DEFAULT_EXIT_REG_READ_SET 19
-#define THEMIS_POLICY_DEFAULT_EXIT_REG_WRITE_SET 20
-#define THEMIS_POLICY_DEFAULT_VECTOR_INJECTABLE 21
-
-/* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
-
-#define THEMIS_SUCCESS       0
-#define THEMIS_ERR_INVALID   1
-#define THEMIS_ERR_NOPERM    2
-#define THEMIS_ERR_NOMEM     3
-#define THEMIS_ERR_BADSTATE  4
-#define THEMIS_ERR_NOTFOUND  5
-#define THEMIS_ERR_BUSY      6
-/* Child VP was preempted by a physical interrupt; caller should retry SWITCH. */
-#define THEMIS_ERR_RETRY     7
-#define THEMIS_ERR_RACE      8
-#define THEMIS_ERR_UNIMPL    (~0ULL)
 
 #ifdef __KERNEL__
 /*
@@ -222,17 +149,6 @@ struct thhv_create_vp {
 	__u64 meta_size;      /* Size in bytes (must be PAGE_SIZE * META_PAGES_PER_VP) */
 	__u64 comm_uaddr;     /* Userspace VA of COMM page (PAGE_SIZE) */
 };
-
-/* ── VM exit reasons (Intel SDM Vol 3C §27.9.1, Appendix C) ──────────── */
-#define THHV_EXIT_REASON_CPUID		10
-#define THHV_EXIT_REASON_HLT		12
-#define THHV_EXIT_REASON_IO		30
-#define THHV_EXIT_REASON_RDMSR		31
-#define THHV_EXIT_REASON_WRMSR		32
-#define THHV_EXIT_REASON_EPT_VIOLATION	48
-
-/* ── Synthetic exit reasons (high bit set, not hardware VMX reasons) ──── */
-#define THHV_EXIT_REASON_YIELD		0x80000003u
 
 /* ── VP activity / MP state (Intel SDM Vol 3C §24.4.2) ───────────────── */
 #define THHV_MP_STATE_RUNNABLE		0
@@ -300,103 +216,6 @@ struct thhv_vp_registers {
 
 #define THHV_MAX_VP_REGS  128
 
-/* ── VpRegister name constants (discriminants from themis-abi) ──────────────── */
-
-/* General-purpose registers (0x00–0x0E) */
-#define THHV_VP_REG_RAX       0x00
-#define THHV_VP_REG_RBX       0x01
-#define THHV_VP_REG_RCX       0x02
-#define THHV_VP_REG_RDX       0x03
-#define THHV_VP_REG_RSI       0x04
-#define THHV_VP_REG_RDI       0x05
-#define THHV_VP_REG_RBP       0x06
-#define THHV_VP_REG_R8        0x07
-#define THHV_VP_REG_R9        0x08
-#define THHV_VP_REG_R10       0x09
-#define THHV_VP_REG_R11       0x0A
-#define THHV_VP_REG_R12       0x0B
-#define THHV_VP_REG_R13       0x0C
-#define THHV_VP_REG_R14       0x0D
-#define THHV_VP_REG_R15       0x0E
-
-/* Stack / instruction / flags (0x10–0x12) */
-#define THHV_VP_REG_RSP       0x10
-#define THHV_VP_REG_RIP       0x11
-#define THHV_VP_REG_RFLAGS    0x12
-
-/* Control registers (0x20–0x24) */
-#define THHV_VP_REG_CR0       0x20
-#define THHV_VP_REG_CR3       0x21
-#define THHV_VP_REG_CR4       0x22
-#define THHV_VP_REG_EFER      0x23
-#define THHV_VP_REG_DR7       0x24
-
-/* Segment selectors (0x30–0x37) */
-#define THHV_VP_REG_CS_SEL    0x30
-#define THHV_VP_REG_DS_SEL    0x31
-#define THHV_VP_REG_ES_SEL    0x32
-#define THHV_VP_REG_FS_SEL    0x33
-#define THHV_VP_REG_GS_SEL    0x34
-#define THHV_VP_REG_SS_SEL    0x35
-#define THHV_VP_REG_TR_SEL    0x36
-#define THHV_VP_REG_LDTR_SEL  0x37
-
-/* Segment bases (0x40–0x47) */
-#define THHV_VP_REG_CS_BASE   0x40
-#define THHV_VP_REG_DS_BASE   0x41
-#define THHV_VP_REG_ES_BASE   0x42
-#define THHV_VP_REG_FS_BASE   0x43
-#define THHV_VP_REG_GS_BASE   0x44
-#define THHV_VP_REG_SS_BASE   0x45
-#define THHV_VP_REG_TR_BASE   0x46
-#define THHV_VP_REG_LDTR_BASE 0x47
-
-/* Segment limits (0x50–0x57) */
-#define THHV_VP_REG_CS_LIM    0x50
-#define THHV_VP_REG_DS_LIM    0x51
-#define THHV_VP_REG_ES_LIM    0x52
-#define THHV_VP_REG_FS_LIM    0x53
-#define THHV_VP_REG_GS_LIM    0x54
-#define THHV_VP_REG_SS_LIM    0x55
-#define THHV_VP_REG_TR_LIM    0x56
-#define THHV_VP_REG_LDTR_LIM  0x57
-
-/* Segment access rights (0x60–0x67) */
-#define THHV_VP_REG_CS_AR     0x60
-#define THHV_VP_REG_DS_AR     0x61
-#define THHV_VP_REG_ES_AR     0x62
-#define THHV_VP_REG_FS_AR     0x63
-#define THHV_VP_REG_GS_AR     0x64
-#define THHV_VP_REG_SS_AR     0x65
-#define THHV_VP_REG_TR_AR     0x66
-#define THHV_VP_REG_LDTR_AR   0x67
-
-/* Descriptor table registers (0x70–0x73) */
-#define THHV_VP_REG_GDTR_BASE  0x70
-#define THHV_VP_REG_GDTR_LIM   0x71
-#define THHV_VP_REG_IDTR_BASE  0x72
-#define THHV_VP_REG_IDTR_LIM   0x73
-
-/* SYSENTER MSRs (0x80–0x82) */
-#define THHV_VP_REG_SYSENTER_CS  0x80
-#define THHV_VP_REG_SYSENTER_ESP 0x81
-#define THHV_VP_REG_SYSENTER_EIP 0x82
-
-/* FS/GS/KernelGS MSRs (0x90–0x92) */
-#define THHV_VP_REG_FS_BASE_MSR     0x90
-#define THHV_VP_REG_GS_BASE_MSR     0x91
-#define THHV_VP_REG_KERNEL_GS_BASE  0x92
-
-/* APIC (0xA0–0xA2) */
-#define THHV_VP_REG_APIC_BASE  0xA0
-#define THHV_VP_REG_TPR        0xA1
-#define THHV_VP_REG_PPR        0xA2
-
-/* VMCS state (0xB0–0xB2) */
-#define THHV_VP_REG_ACTIVITY_STATE         0xB0
-#define THHV_VP_REG_INTERRUPTIBILITY_STATE 0xB1
-#define THHV_VP_REG_PAT                   0xB2
-
 /*
  * VP COMM page — shared between driver and capavisor for bulk register transfer.
  *
@@ -404,8 +223,6 @@ struct thhv_vp_registers {
  * The driver writes register values + sets dirty_mask bits; the capavisor
  * validates and applies them at SWITCH time.
  */
-#define VP_COMM_MASK_WORDS  3
-
 struct thhv_vp_comm_page {
 	__u64 dirty_mask[VP_COMM_MASK_WORDS];     /* offset   0 */
 	__u64 allowed_mask[VP_COMM_MASK_WORDS];   /* offset  24 */
@@ -508,20 +325,12 @@ void thhv_comm_set_reg(struct thhv_vp_comm_page *comm, unsigned int reg, __u64 v
  */
 
 #define THEMIC_NUM_CHANNELS       16
-#define THEMIC_MSG_SLOT_SIZE      256   /* bytes per slot */
 
 /* Channel indices (slots in the message page). */
 #define THEMIC_CHAN_INTERCEPT      0     /* VP exit / intercept messages */
 #define THEMIC_CHAN_DOORBELL       1     /* Doorbell event notifications */
 #define THEMIC_CHAN_IRQ_ACK        2     /* Interrupt injection acks */
 /* 3–15 reserved */
-
-/* Message types (in themic_message_header.message_type). */
-#define THEMIC_MSG_NONE           0x0000
-#define THEMIC_MSG_VP_INTERCEPT   0x0001  /* VP exit: IO, MMIO, CPUID, MSR, HLT, etc. */
-#define THEMIC_MSG_DOORBELL       0x0002  /* Doorbell write detected */
-#define THEMIC_MSG_IRQ_ACK        0x0003  /* Interrupt delivery acknowledged */
-#define THEMIC_MSG_SHUTDOWN       0x0004  /* Domain shutdown / triple fault */
 
 struct themic_message_header {
 	__u32 message_type;           /* THEMIC_MSG_* */
@@ -627,38 +436,12 @@ struct thhv_run_vp {
  * See docs/domain-comm.md for the original design.
  */
 
-#define DOMCOMM_MAGIC         0x444F4D43  /* "DOMC" */
-#define DOMCOMM_VERSION_MAJOR 1
-#define DOMCOMM_VERSION_MINOR 0
-
 /* ── DomainComm message types ───────────────────────────────────────────────
  *
  * Version 1 uses the largest power-of-two capacity within the backing pages.
  * RX messages may cross page/ring boundaries and publish their head once.
  * The TX producer still pads to the next page when necessary (type=0).
  */
-
-/* Capavisor → Domain (RX ring) */
-#define DOMCOMM_MSG_NONE          0x0000  /* padding / skip */
-#define DOMCOMM_MSG_ATTEST        0x0001  /* Binary attestation report */
-#define DOMCOMM_MSG_VP_EXIT       0x0002  /* Async VP exit notification */
-#define DOMCOMM_MSG_IRQ_NOTIFY    0x0003  /* Interrupt delivery event */
-#define DOMCOMM_MSG_DOMAIN_EVENT  0x0004  /* Child domain state change */
-#define DOMCOMM_MSG_ERROR         0x0005  /* Error / backpressure signal */
-#define DOMCOMM_MSG_GROW_ACK      0x0006  /* Ring growth acknowledged */
-#define DOMCOMM_MSG_DOORBELL_EVENT  0x0008 /* Recipient-scoped port and opaque value */
-
-/* Domain → Capavisor (TX ring) */
-#define DOMCOMM_MSG_ATTEST_REQ    0x0100  /* Request (self-)attestation */
-#define DOMCOMM_MSG_ACK           0x0101  /* Acknowledge RX message */
-#define DOMCOMM_MSG_BULK_REG_SET  0x0102  /* Bulk register write */
-#define DOMCOMM_MSG_GROW_RX       0x0103  /* Request RX ring growth */
-#define DOMCOMM_MSG_GROW_TX       0x0104  /* Request TX ring growth */
-#define DOMCOMM_MSG_ENUM_CAP      0x0105  /* Enumerate single capability */
-
-/* ── DomainComm header flags ────────────────────────────────────────────── */
-#define DOMCOMM_FLAG_RX_READY    (1U << 0)  /* RX ring has data */
-#define DOMCOMM_FLAG_TX_READY    (1U << 1)  /* TX ring has data */
 
 /* ── DomainComm ring metadata (embedded in header page) ─────────────────── */
 
@@ -704,13 +487,7 @@ struct domcomm_msg_header {
 	__u64 sequence;               /* Monotonic counter */
 };
 
-#define DOMCOMM_MSG_HDR_SIZE   sizeof(struct domcomm_msg_header)  /* 16 */
-#define DOMCOMM_MAX_PAYLOAD    (4096 - DOMCOMM_MSG_HDR_SIZE)     /* 4080 */
-
 /* ── Binary attestation report (DOMCOMM_MSG_ATTEST payload) ─────────────── */
-
-/* Attestation flags */
-#define DOMCOMM_ATTEST_F_SEALED  (1U << 0)
 
 /*
  * Memory capability entry — one per owned memory capability.
@@ -748,8 +525,6 @@ struct domcomm_doorbell_entry {
 	__u8 kind;
 	__u8 reserved[6];
 };  /* 40 bytes */
-
-#define DOMCOMM_ATTEST_F_DOORBELLS (1U << 2)
 
 /*
  * Binary attestation report header (common base).
@@ -824,8 +599,6 @@ struct domcomm_error {
 	__u64 detail;                 /* Context-dependent */
 };
 
-#define DOMCOMM_ERR_RING_FULL     1  /* Ring is full, domain should grow */
-#define DOMCOMM_ERR_BAD_REQUEST   2  /* Malformed TX message */
 
 /* DOMCOMM_MSG_ENUM_CAP payload (TX ring, request) */
 struct domcomm_enum_cap_req {
@@ -976,8 +749,8 @@ struct thhv_query {
  * full size so the caller can resize and retry.
  */
 struct thhv_attest_self {
-	__u8  nonce[32];         /* in: verifier-supplied nonce */
-	__u8  user_pub_key[32];  /* in: verifier's public key (bound into signature) */
+	__u8  nonce[ATTEST_NONCE_SIZE]; /* in: verifier-supplied nonce */
+	__u8  user_pub_key[ATTEST_KEY_SIZE]; /* in: verifier's public key */
 	__u64 buf_uaddr;         /* in: userspace VA of report buffer */
 	__u64 buf_len;           /* in: capacity in bytes */
 	__u64 report_size;       /* out: total bytes of report (always set) */
@@ -995,10 +768,10 @@ struct thhv_attest_self {
  * in `report_buf` (i.e. immediately after the common-base entries).
  */
 struct domcomm_signed_envelope {
-	__u8  signature[64];     /* Ed25519 signature */
-	__u8  pub_key[32];       /* capavisor Ed25519 pub key */
-	__u8  nonce[32];         /* echoed nonce */
-	__u8  user_pub_key[32];  /* echoed user pub key */
+	__u8  signature[ATTEST_SIG_SIZE]; /* Ed25519 signature */
+	__u8  pub_key[ATTEST_KEY_SIZE]; /* capavisor Ed25519 pub key */
+	__u8  nonce[ATTEST_NONCE_SIZE]; /* echoed nonce */
+	__u8  user_pub_key[ATTEST_KEY_SIZE]; /* echoed user pub key */
 	__u16 tpm_quote_size;
 	__u16 tpm_sig_size;
 	__u16 ak_pub_size;

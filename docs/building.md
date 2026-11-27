@@ -153,6 +153,23 @@ LINUX_DIR=/custom/path JOBS=16 cargo build-kernel     # custom path
 
 Output: `themis/guest/kernel/bzImage`
 
+The shared C protocol constants are generated from `themis-abi` Rust definitions,
+including hypercall opcodes, policy kinds, return codes, CPUID discovery,
+VP register selectors, exit reasons and PV/DomainComm layouts:
+
+```bash
+bash themis/scripts/generate-abi-header.sh ../linux
+bash themis/scripts/generate-abi-header.sh --check ../linux
+```
+
+This updates/checks `thhv/inc/themis_abi.h` and the Linux copy at
+`include/linux/themis_abi.h`. Both copies are checked in and marked
+auto-generated; do not edit them manually. Omit the Linux path when updating
+only the driver copy. The parent kernel-build helper and driver build check
+for stale headers. Ordinary `make` inside Linux uses its checked-in header
+without requiring Rust or this repository. Hypercall wrapper implementations
+remain separate pending their own unification.
+
 See [themis/scripts/README](../themis/scripts/README.md) §Building the Themis
 CoCo guest kernel for full details.
 

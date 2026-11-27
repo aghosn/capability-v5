@@ -42,7 +42,6 @@
 #define PAGE_SIZE_4K           4096
 
 /* Exit reasons (Intel SDM Vol 3C Appendix C). */
-#define EXIT_REASON_HLT        12
 
 /* ── Helpers ───────────────────────────────────────────────────────────────── */
 
@@ -240,9 +239,9 @@ int main(void)
 		if (msg->header.message_type != THEMIC_MSG_VP_INTERCEPT)
 			FAIL("expected message_type 0x%04x, got 0x%04x",
 			     THEMIC_MSG_VP_INTERCEPT, msg->header.message_type);
-		if (msg->exit_reason != EXIT_REASON_HLT)
+		if (msg->exit_reason != THHV_EXIT_REASON_HLT)
 			FAIL("expected exit_reason %d (HLT), got %u",
-			     EXIT_REASON_HLT, msg->exit_reason);
+			     THHV_EXIT_REASON_HLT, msg->exit_reason);
 	}
 
 	printf("\n  Child HLT recorded; driver wait interrupted correctly.\n");

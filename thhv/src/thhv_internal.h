@@ -173,7 +173,7 @@ struct thhv_vp {
 	wait_queue_head_t halt_wq;
 
 	/* Exit info buffer for userspace. */
-	u8 exit_msg[256];
+	u8 exit_msg[THEMIC_MSG_SLOT_SIZE];
 
 	/* META pages: pinned from userspace, for capavisor internal alloc. */
 	struct page **meta_pages;
@@ -393,9 +393,6 @@ int  domcomm_request_grow(bool grow_rx, u32 nr_pages);
 int themis_domcomm_notify_grow(u64 *pages, u64 *capacity);
 int thhv_doorbell_target_vp(unsigned int cpu, u64 *vp);
 int thhv_hpa_to_gpa(u64 hpa, u64 *gpa);
-
-#define THHV_DOMCOMM_PAGE_LIST (1U << 0)
-#define THHV_DOMCOMM_SYNC_GROW (1U << 1)
 
 /* Global DomainComm instance. */
 extern struct domcomm_state thhv_domcomm;

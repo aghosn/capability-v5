@@ -65,6 +65,8 @@ fi
 
 # --- Configure -------------------------------------------------------------
 
+bash "$SCRIPT_DIR/generate-abi-header.sh" --check "$LINUX_DIR"
+
 echo "=== Themis kernel build ==="
 echo "  Linux dir:  $LINUX_DIR"
 echo "  Profile:    $KERNEL_PROFILE"
